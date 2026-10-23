@@ -1,0 +1,27 @@
+# Node / frontend
+node_modules/
+dist/
+*.local
+
+# Rust / Tauri
+desktop/src-tauri/target/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Logs
+*.log

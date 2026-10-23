@@ -1,0 +1,435 @@
+package com.interlink.app.handlers
+
+import android.content.ContentUris
+import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
+import com.interlink.app.core.Bus
+import com.interlink.app.core.Envelope
+import com.interlink.app.core.LinkClient
+import com.interlink.app.core.LinkSession
+import com.interlink.app.core.int
+import com.interlink.app.core.long
+import com.interlink.app.core.objOf
+import com.interlink.app.core.str
+import com.interlink.app.core.tidKey
+import com.interlink.app.core.tidRaw
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
+import kotlin.math.max
+
+/**
+ * Media browsing + transfers (PROTOCOL.md §4.4).
+ *
+ * Media ids are "<prefix>:<mediaStoreId>" where prefix is "i" (image) or
+ * "v" (video), so a bare numeric id from MediaStore is never ambiguous.
+ * Thumbnails and full files are streamed back as kind-0x02 DATA frames over
+ * the tid the laptop pre-registers in the request payload.
+ */
+object MediaHandler {
+    private const val TAG = "MediaHandler"
+    private const val CHUNK = 64 * 1024 // 64 KiB — protocol chunk size
+    private const val THUMB_MAX_BYTES = 64L * 1024 // protocol: thumb JPEG ≤ 64 KB
+
+    /** Outlives a single request so transfers finish even if the service rebinds. */
+    private val assemblerScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + Dispatchers.IO,
+    )
+
+    // ——— media.list ———
+
+    fun list(context: Context, d: JsonElement): JsonObject {
+        val type = d.str("type") ?: "all"
+        val offset = (d.int("offset") ?: 0).coerceAtLeast(0)
+        val limit = (d.int("limit") ?: 50).coerceIn(1, 100)
+
+        // Newest (offset + limit) from each collection, merged by date desc.
+        val need = offset + limit
+        val merged = mutableListOf<JsonObject>()
+        if (type == "all" || type == "image") {
+            merged += queryCollection(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "i", need)
+        }
+        if (type == "all" || type == "video") {
+            merged += queryCollection(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "v", need)
+        }
+        merged.sortByDescending {
+            (it["date"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull() ?: 0L
+        }
+        val page = merged.drop(offset).take(limit)
+        return buildJsonObject {
+            // total is a lower bound (page + offset); laptop only checks it to
+            // know whether further pages may exist.
+            put("total", page.size + offset)
+            put("items", buildJsonArray { page.forEach { add(it) } })
+        }
+    }
+
+    private fun queryCollection(
+        context: Context,
+        base: Uri,
+        prefix: String,
+        need: Int,
+    ): List<JsonObject> {
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.DATE_ADDED,
+            MediaStore.MediaColumns.WIDTH,
+            MediaStore.MediaColumns.HEIGHT,
+        )
+        val items = mutableListOf<JsonObject>()
+        try {
+            context.contentResolver.query(
+                base, projection, null, null,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC",
+            )?.use { c ->
+                val idIdx = c.getColumnIndex(MediaStore.MediaColumns._ID)
+                val nameIdx = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                val mimeIdx = c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                val sizeIdx = c.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                val dateIdx = c.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
+                val wIdx = c.getColumnIndex(MediaStore.MediaColumns.WIDTH)
+                val hIdx = c.getColumnIndex(MediaStore.MediaColumns.HEIGHT)
+                val durIdx = c.getColumnIndex(MediaStore.MediaColumns.DURATION)
+                while (c.moveToNext() && items.size < need) {
+                    items.add(
+                        buildJsonObject {
+                            put("id", "$prefix:${c.getLong(idIdx)}")
+                            put("name", c.getString(nameIdx) ?: "file")
+                            put("mime", if (mimeIdx >= 0) c.getString(mimeIdx) ?: "" else "")
+                            put("size", if (sizeIdx >= 0) c.getLong(sizeIdx) else 0L)
+                            if (wIdx >= 0 && !c.isNull(wIdx)) put("w", c.getInt(wIdx))
+                            if (hIdx >= 0 && !c.isNull(hIdx)) put("h", c.getInt(hIdx))
+                            // DATE_ADDED is seconds — protocol wants epoch millis.
+                            put("date", (if (dateIdx >= 0) c.getLong(dateIdx) else 0L) * 1000)
+                            if (durIdx >= 0 && !c.isNull(durIdx)) put("dur", c.getLong(durIdx))
+                        },
+                    )
+                }
+            }
+        } catch (e: SecurityException) {
+            throw Exception("perm: media permission not granted")
+        }
+        return items
+    }
+
+    // ——— shared id resolution ———
+
+    private data class Entry(val id: Long, val contentUri: Uri, val isImage: Boolean)
+
+    private fun resolve(idStr: String): Entry {
+        val parts = idStr.split(":", limit = 2)
+        if (parts.size != 2) throw Exception("not_found: bad media id")
+        val prefix = parts[0]
+        val id = parts[1].toLongOrNull() ?: throw Exception("not_found: bad media id")
+        return when (prefix) {
+            "i" -> Entry(id, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true)
+            "v" -> Entry(id, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, false)
+            else -> throw Exception("not_found: unknown media id")
+        }
+    }
+
+    private fun uriOf(e: Entry): Uri = ContentUris.withAppendedId(e.contentUri, e.id)
+
+    private fun metadata(context: Context, e: Entry): Triple<String, Long, String> {
+        var name = "media_${e.id}"
+        var size = 0L
+        var mime = if (e.isImage) "image/*" else "video/*"
+        context.contentResolver.query(
+            uriOf(e), arrayOf(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.SIZE,
+                MediaStore.MediaColumns.MIME_TYPE,
+            ), null, null, null,
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                name = c.getString(0) ?: name
+                size = c.getLong(1)
+                mime = c.getString(2) ?: mime
+            }
+        }
+        return Triple(name, size, mime)
+    }
+
+    // ——— media.thumb ———
+
+    /**
+     * Compress a small JPEG and stream it as a single 0x02 frame (seq 0).
+     * The laptop pre-registers its collector for `tid` before sending this
+     * request (see desktop commands.rs media_thumb), so we may send data
+     * right after responding.
+     */
+    suspend fun thumb(context: Context, session: LinkSession, env: Envelope) =
+        withContext(Dispatchers.IO) {
+            val d = env.d
+            val idStr = d.str("id") ?: throw Exception("not_found: missing id")
+            val tidB64 = d.str("tid") ?: throw Exception("internal: missing tid")
+            val width = (d.int("w") ?: 320).coerceIn(64, 1280)
+
+            val entry = resolve(idStr)
+            val bmp = loadThumbBitmap(context, entry, width)
+                ?: throw Exception("not_found: no thumbnail")
+            val jpeg = compressJpeg(bmp, THUMB_MAX_BYTES)
+            bmp.recycle()
+
+            // Respond first (the laptop's collector is already registered),
+            // then exactly one 0x02 frame with the JPEG (seq 0).
+            session.respond(Envelope.response(env.id, env.t, objOf("tid" to tidB64, "mime" to "image/jpeg")))
+            session.sendData(tidRaw(tidB64), 0, jpeg)
+        }
+
+    private fun loadThumbBitmap(context: Context, e: Entry, width: Int): Bitmap? {
+        // Videos: MediaStore mini-thumbnail.
+        if (!e.isImage) {
+            @Suppress("DEPRECATION")
+            MediaStore.Video.Thumbnails.getThumbnail(
+                context.contentResolver, e.id, MediaStore.Video.Thumbnails.MINI_KIND, null,
+            )?.let { return it }
+        }
+        return try {
+            val uri = uriOf(e)
+            if (Build.VERSION.SDK_INT >= 28) {
+                val src = ImageDecoder.createSource(context.contentResolver, uri)
+                ImageDecoder.decodeBitmap(src) { decoder, info, _ ->
+                    val scale = max(1f, info.size.width.toFloat() / width)
+                    decoder.setTargetSize(
+                        (info.size.width / scale).toInt().coerceAtLeast(1),
+                        (info.size.height / scale).toInt().coerceAtLeast(1),
+                    )
+                    decoder.isMutableRequired = false
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                decodeSampled(context, uri, width)
+            }
+        } catch (e2: Exception) {
+            Log.w(TAG, "thumb decode failed: ${e2.message}")
+            null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun decodeSampled(context: Context, uri: Uri, width: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, bounds)
+        } ?: return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= width) sample *= 2
+        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+        return context.contentResolver.openInputStream(uri)?.use {
+            BitmapFactory.decodeStream(it, null, opts)
+        }
+    }
+
+    /** JPEG-compress, stepping quality down until it fits [maxBytes]. */
+    private fun compressJpeg(bmp: Bitmap, maxBytes: Long): ByteArray {
+        for (quality in intArrayOf(75, 55, 35, 20)) {
+            val out = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            if (out.size() <= maxBytes || quality == 20) return out.toByteArray()
+        }
+        return ByteArrayOutputStream().also {
+            bmp.compress(Bitmap.CompressFormat.JPEG, 20, it)
+        }.toByteArray()
+    }
+
+    // ——— media.get ———
+
+    /** Respond with {tid,size,chunks,name,mime}, then stream N × 0x02 frames. */
+    suspend fun get(context: Context, session: LinkSession, env: Envelope) =
+        withContext(Dispatchers.IO) {
+            val d = env.d
+            val idStr = d.str("id") ?: throw Exception("not_found: missing id")
+            val tidB64 = d.str("tid") ?: throw Exception("internal: missing tid")
+            val entry = resolve(idStr)
+            val (name, size, mime) = metadata(context, entry)
+
+            // Response first so the laptop knows what to expect; chunks follow.
+            session.respond(
+                Envelope.response(
+                    env.id, env.t,
+                    objOf(
+                        "tid" to tidB64,
+                        "size" to size,
+                        "chunks" to max(1L, (size + CHUNK - 1) / CHUNK),
+                        "name" to name,
+                        "mime" to mime,
+                    ),
+                ),
+            )
+            val raw = tidRaw(tidB64)
+            val buf = ByteArray(CHUNK)
+            var seq = 0
+            context.contentResolver.openInputStream(uriOf(entry))?.use { input ->
+                while (true) {
+                    val n = input.read(buf)
+                    if (n <= 0) break
+                    if (!session.sendData(raw, seq, buf.copyOf(n))) {
+                        Log.w(TAG, "media.get: connection lost at seq $seq")
+                        break
+                    }
+                    seq++
+                }
+            } ?: throw Exception("not_found: cannot open $idStr")
+        }
+
+    // ——— file.offer (laptop → phone) ———
+
+    /**
+     * Accept an incoming transfer: register the data collector BEFORE the
+     * response goes out (chunks may follow immediately), then assemble in the
+     * background and push transfer.done/file.done once written.
+     */
+    suspend fun receiveOffer(
+        context: Context,
+        client: LinkClient,
+        d: JsonElement,
+    ): JsonObject {
+        val tidB64 = d.str("tid") ?: throw Exception("internal: missing tid")
+        val name = d.str("name") ?: "transfer.bin"
+        val mime = d.str("mime") ?: "application/octet-stream"
+        val size = d.long("size") ?: 0L
+        val key = tidKey(tidB64)
+
+        // Register BEFORE responding — LinkService sends the response after we
+        // return, and the desktop begins streaming the moment it receives it.
+        val ch = client.collectorFor(key, capacity = 64)
+
+        launchAssembler(context, client, key, tidB64, name, mime, size, ch)
+        return objOf("tid" to tidB64, "status" to "accepted")
+    }
+
+    private fun launchAssembler(
+        context: Context,
+        client: LinkClient,
+        key: String,
+        tidB64: String,
+        name: String,
+        mime: String,
+        size: Long,
+        ch: kotlinx.coroutines.channels.Channel<Pair<Int, ByteArray>>,
+    ) {
+        assemblerScope.launch(Dispatchers.IO) {
+            var received = 0L
+            var nextSeq = 0
+            try {
+                val (out, displayPath) = openOutput(context, name, mime)
+                try {
+                    while (true) {
+                        val (seq, chunk) = try {
+                            ch.receive()
+                        } catch (_: ClosedReceiveChannelException) {
+                            break
+                        }
+                        if (seq != nextSeq) throw Exception("sequence gap at $seq")
+                        nextSeq++
+                        out.write(chunk)
+                        received += chunk.size
+                        if (size > 0 && received >= size) break
+                    }
+                    out.flush()
+                } finally {
+                    out.close()
+                }
+                client.push(
+                    "transfer.done",
+                    objOf(
+                        "tid" to tidB64,
+                        "name" to name,
+                        "path" to displayPath,
+                        "size" to received,
+                    ),
+                )
+                // PROTOCOL.md §4.4 canonical completion push as well.
+                client.push("file.done", objOf("tid" to tidB64, "path" to displayPath))
+                Log.i(TAG, "saved $name → $displayPath ($received B)")
+            } catch (e: Exception) {
+                Log.e(TAG, "incoming transfer failed: ${e.message}")
+                client.push(
+                    "transfer.failed",
+                    objOf("tid" to tidB64, "name" to name, "error" to (e.message ?: "failed")),
+                )
+            } finally {
+                client.dropCollector(key)
+            }
+        }
+    }
+
+    /** Writes into Downloads/InterLink — MediaStore on Q+, File API below. */
+    private fun openOutput(context: Context, name: String, mime: String): Pair<OutputStream, String> {
+        val safeName = name.substringAfterLast('/').ifBlank { "transfer.bin" }
+        return if (Build.VERSION.SDK_INT >= 29) {
+            val values = android.content.ContentValues().apply {
+                // MediaStore auto-uniquifies DISPLAY_NAME collisions on Q+.
+                put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                put(MediaStore.Downloads.MIME_TYPE, mime)
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/InterLink")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = context.contentResolver.insert(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+            ) ?: throw Exception("internal: MediaStore insert failed")
+            val out = context.contentResolver.openOutputStream(uri)
+                ?: throw Exception("internal: cannot open output")
+            // Clear IS_PENDING on close via a wrapper.
+            val pending = object : OutputStream() {
+                override fun write(b: Int) = out.write(b)
+                override fun write(b: ByteArray) = out.write(b)
+                override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+                override fun flush() = out.flush()
+                override fun close() {
+                    out.close()
+                    android.content.ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
+                        .let { context.contentResolver.update(uri, it, null, null) }
+                }
+            }
+            pending to "${Environment.DIRECTORY_DOWNLOADS}/InterLink/$safeName"
+        } else {
+            @Suppress("DEPRECATION")
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "InterLink",
+            )
+            dir.mkdirs()
+            val dest = uniqueFile(dir, safeName)
+            FileOutputStream(dest) to dest.absolutePath
+        }
+    }
+
+    /** name → name_1 → name_2 … on collision (pre-Q path). */
+    private fun uniqueFile(dir: File, name: String): File {
+        val direct = File(dir, name)
+        if (!direct.exists()) return direct
+        val dot = name.lastIndexOf('.')
+        val stem = if (dot > 0) name.substring(0, dot) else name
+        val ext = if (dot > 0) name.substring(dot) else ""
+        for (i in 1..9999) {
+            val cand = File(dir, "${stem}_$i$ext")
+            if (!cand.exists()) return cand
+        }
+        return direct
+    }
+}

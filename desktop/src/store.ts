@@ -1,0 +1,90 @@
+import { useSyncExternalStore } from "react";
+import type {
+  CallState,
+  NotifItem,
+  Status,
+  Toast,
+  Transfer,
+} from "./types";
+
+// ——— Tiny global store (no external deps) ———
+
+export interface AppState {
+  page: string;
+  status: Status | null;
+  connected: boolean;
+  notifications: NotifItem[];
+  call: CallState | null;
+  callMuted: boolean;
+  audioBroken: string | null;
+  transfers: Record<string, Transfer>;
+  toasts: Toast[];
+  qrModal: boolean;
+  recentFiles: { name: string; path: string; when: number }[];
+}
+
+let state: AppState = {
+  page: "dashboard",
+  status: null,
+  connected: false,
+  notifications: [],
+  call: null,
+  callMuted: false,
+  audioBroken: null,
+  transfers: {},
+  toasts: [],
+  qrModal: false,
+  recentFiles: [],
+};
+
+const listeners = new Set<() => void>();
+
+export function setState(patch: Partial<AppState>) {
+  state = { ...state, ...patch };
+  listeners.forEach((l) => l());
+}
+
+export function getState() {
+  return state;
+}
+
+export function subscribe(l: () => void) {
+  listeners.add(l);
+  return () => listeners.delete(l);
+}
+
+export function useStore<T>(sel: (s: AppState) => T): T {
+  return useSyncExternalStore(
+    subscribe,
+    () => sel(state),
+    () => sel(state),
+  );
+}
+
+let toastId = 0;
+export function toast(text: string, kind: Toast["kind"] = "info") {
+  const id = ++toastId;
+  setState({ toasts: [...getState().toasts, { id, text, kind }] });
+  setTimeout(() => {
+    setState({ toasts: getState().toasts.filter((t) => t.id !== id) });
+  }, 4200);
+}
+
+export function addNotification(n: NotifItem) {
+  const list = [n, ...getState().notifications.filter((x) => x.key !== n.key)];
+  setState({ notifications: list.slice(0, 200) });
+}
+
+export function removeNotification(key: string) {
+  setState({ notifications: getState().notifications.filter((n) => n.key !== key) });
+}
+
+export function upsertTransfer(t: Transfer) {
+  setState({ transfers: { ...getState().transfers, [t.tid]: t } });
+}
+
+export function addRecentFile(name: string, path: string) {
+  setState({
+    recentFiles: [{ name, path, when: Date.now() }, ...getState().recentFiles].slice(0, 20),
+  });
+}
