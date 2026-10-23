@@ -17,6 +17,8 @@ export interface AppState {
   call: CallState | null;
   callMuted: boolean;
   audioBroken: string | null;
+  /** Why the link is failing (e.g. pairing mismatch) — shown as a banner. */
+  linkError: string | null;
   transfers: Record<string, Transfer>;
   toasts: Toast[];
   qrModal: boolean;
@@ -31,6 +33,7 @@ let state: AppState = {
   call: null,
   callMuted: false,
   audioBroken: null,
+  linkError: null,
   transfers: {},
   toasts: [],
   qrModal: false,

@@ -154,7 +154,22 @@ impl AppState {
         let json = serde_json::to_string_pretty(&inner.cfg).unwrap_or_default();
         let path = inner.cfg_path.clone();
         drop(inner);
-        let _ = tokio::fs::write(path, json).await;
+        // Atomic write: a truncate+write can be interrupted (crash, kill -9,
+        // full disk) and leave a half-written file, which on the next start
+        // would silently discard the pairing secret. Write to a temp file,
+        // keep the previous good copy as .bak, then rename into place.
+        let tmp = path.with_extension("json.tmp");
+        let bak = path.with_extension("json.bak");
+        if tokio::fs::write(&tmp, &json).await.is_err() {
+            log::error!("config save failed (temp write): {}", tmp.display());
+            return;
+        }
+        if path.exists() {
+            let _ = tokio::fs::copy(&path, &bak).await;
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            log::error!("config save failed (rename): {e}");
+        }
     }
 
     pub async fn config_secret(&self) -> Option<Vec<u8>> {
@@ -263,7 +278,26 @@ impl AppState {
 
 fn load_config(path: &PathBuf) -> Config {
     match std::fs::read_to_string(path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(s) => match serde_json::from_str::<Config>(&s) {
+            Ok(c) => c,
+            Err(e) => {
+                // Never silently discard a corrupt config — that loses the
+                // pairing secret and forces a re-pair with no explanation.
+                log::error!(
+                    "config.json is corrupt ({e}) — attempting backup restore: {}",
+                    path.display()
+                );
+                let bak = path.with_extension("json.bak");
+                if let Ok(b) = std::fs::read_to_string(&bak) {
+                    if let Ok(c) = serde_json::from_str::<Config>(&b) {
+                        log::warn!("restored config from backup: {}", bak.display());
+                        return c;
+                    }
+                }
+                log::error!("no usable backup — starting unpaired (re-pair from the QR dialog)");
+                Config::default()
+            }
+        },
         Err(_) => Config::default(),
     }
 }

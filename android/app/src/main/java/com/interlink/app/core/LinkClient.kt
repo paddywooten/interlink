@@ -151,10 +151,17 @@ class LinkClient(
                 connectSession(host!!, cfg.port, cfg)
                 attempt = 0
             } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
+                // A real stop() cancellation ends the loop. But withTimeout()
+                // throws TimeoutCancellationException (a CancellationException)
+                // on expiry — that must NOT kill the retry loop.
+                if (e !is kotlinx.coroutines.TimeoutCancellationException || !scope.isActive) throw e
+                Log.w(tag, "handshake timed out")
+                setState(LinkState.DISCONNECTED, "handshake timeout")
+                attempt++
+                delay(backoff(attempt))
             } catch (e: Exception) {
-                Log.w(tag, "connect failed: ${e.message}")
-                setState(LinkState.DISCONNECTED, e.message)
+                Log.w(tag, "connect failed: ${e.javaClass.simpleName}: ${e.message}")
+                setState(LinkState.DISCONNECTED, e.message ?: e.javaClass.simpleName)
                 attempt++
                 if (attempt >= 3) {
                     // Endpoint likely stale (DHCP renewal) → UDP whois.
@@ -234,8 +241,21 @@ class LinkClient(
             socket.send(ByteString.of(*rootKey.sealMsg(helloJson.toByteArray(Charsets.UTF_8))))
 
             // ——— hello_ack ———
-            val first = withTimeout(15_000) { inbound.receive() }
-            val ackJson = rootKey.openMsg(first)
+            // The laptop drops the socket without replying if it can't decrypt
+            // our hello (wrong pairing secret) or is unpaired. Map that to a
+            // clear message instead of a generic "channel closed".
+            val first = try {
+                withTimeout(15_000) { inbound.receive() }
+            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                throw Exception("no reply to handshake — laptop may be unpaired or keys differ")
+            } catch (e: Exception) {
+                throw Exception("laptop closed during handshake — re-scan the QR code (${e.message})")
+            }
+            val ackJson = try {
+                rootKey.openMsg(first)
+            } catch (e: Exception) {
+                throw Exception("handshake reply not decryptable — pairing keys differ, re-scan the QR code")
+            }
             val ack = Envelope.json.decodeFromString(Envelope.serializer(), String(ackJson, Charsets.UTF_8))
             if (ack.t != "hello_ack") throw Exception("expected hello_ack, got ${ack.t}")
             val serverNonce = Base64.decode(

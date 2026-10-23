@@ -51,6 +51,15 @@ import kotlinx.coroutines.launch
 @Composable
 fun AppUi(prefs: Prefs) {
     var tab by remember { mutableIntStateOf(0) }
+
+    // Auto-start the link service on launch if already paired, so the phone
+    // reconnects without the user having to tap "Start link service" each time.
+    val context = LocalContext.current
+    val autoConfig by prefs.config.collectAsState(initial = null)
+    LaunchedEffect(autoConfig?.secretB64 != null) {
+        if (autoConfig?.secretB64 != null) LinkService.start(context)
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
@@ -91,6 +100,8 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val state by LinkService.state.collectAsState()
     val detail by LinkService.stateDetail.collectAsState()
+    // Local non-delegated copy: delegated properties can't be smart-cast.
+    val statusDetail: String? = detail
 
     // Permission grant state; recomputed whenever `tick` changes.
     var tick by remember { mutableIntStateOf(0) }
@@ -115,9 +126,16 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
                 Spacer(Modifier.padding(4.dp))
                 Text(
                     text = when (state) {
-                        LinkState.CONNECTED -> "Connected (${detail ?: "laptop"})"
+                        LinkState.CONNECTED -> "Connected (${statusDetail ?: "laptop"})"
                         LinkState.CONNECTING, LinkState.HANDSHAKING -> "Connecting…"
-                        LinkState.DISCONNECTED -> if (detail == "unpaired") "Not paired — scan the QR on your laptop" else "Disconnected — retrying"
+                        LinkState.DISCONNECTED -> when {
+                            statusDetail == "unpaired" -> "Not paired — scan the QR on your laptop"
+                            statusDetail?.contains("re-scan") == true ||
+                                statusDetail?.contains("keys differ") == true ->
+                                "Pairing problem: $statusDetail"
+                            !statusDetail.isNullOrBlank() -> "Disconnected ($statusDetail) — retrying"
+                            else -> "Disconnected — retrying"
+                        }
                     },
                     color = when (state) {
                         LinkState.CONNECTED -> MaterialTheme.colorScheme.primary

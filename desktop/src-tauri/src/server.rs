@@ -88,6 +88,11 @@ async fn handle_connection(
         Some(s) => s,
         None => {
             log::warn!("unpaired peer rejected from {peer_addr}");
+            state.emit(
+                "conn",
+                json!({ "connected": false, "error": "unpaired",
+                        "detail": "A phone connected but this laptop has no pairing secret. Open the Pair dialog and re-scan." }),
+            );
             return;
         }
     };
@@ -104,6 +109,11 @@ async fn handle_connection(
         Ok(p) => p,
         Err(_) => {
             log::warn!("hello failed to decrypt from {peer_addr} — wrong pairing secret?");
+            state.emit(
+                "conn",
+                json!({ "connected": false, "error": "pairing_mismatch",
+                        "detail": "A phone tried to connect with an old pairing code. Rotate the QR code and re-scan from the phone." }),
+            );
             return;
         }
     };

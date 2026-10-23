@@ -6,6 +6,7 @@ import { setState, toast, useStore } from "../store";
 export default function Dashboard() {
   const status = useStore((s) => s.status);
   const connected = useStore((s) => s.connected);
+  const linkError = useStore((s) => s.linkError);
   const transfers = useStore((s) => s.transfers);
   const recent = useStore((s) => s.recentFiles);
   const [ringing, setRinging] = useState(false);
@@ -23,6 +24,23 @@ export default function Dashboard() {
           </button>
         )}
       </header>
+
+      {linkError && (
+        <div className="banner error">
+          <div>
+            <b>Phone can't connect.</b> {linkError}
+          </div>
+          <button
+            className="btn ghost"
+            onClick={() => {
+              setState({ linkError: null });
+              setState({ qrModal: true });
+            }}
+          >
+            Show pairing QR
+          </button>
+        </div>
+      )}
 
       {!paired ? (
         <div className="hero">

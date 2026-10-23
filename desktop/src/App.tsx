@@ -47,6 +47,13 @@ export default function App() {
       if (ev.kind === "conn") {
         const connectedNow = !!ev.data.connected;
         setState({ connected: connectedNow });
+        if (ev.data.error) {
+          const msg = ev.data.detail ?? ev.data.error;
+          setState({ linkError: msg });
+          toast(msg, "error");
+        } else if (connectedNow) {
+          setState({ linkError: null });
+        }
         refresh();
         if (!connectedNow) setState({ call: null });
         return;

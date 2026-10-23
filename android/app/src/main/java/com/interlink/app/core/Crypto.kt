@@ -103,7 +103,8 @@ object Crypto {
     }
 
     // ——— HChaCha20 ———
-    private fun hchacha20(key: ByteArray, nonce16: ByteArray): ByteArray {
+    // internal (not private) so unit tests can check it against the RFC test vector.
+    internal fun hchacha20(key: ByteArray, nonce16: ByteArray): ByteArray {
         val st = IntArray(16)
         // constants "expand 32-byte k"
         st[0] = 0x61707865
@@ -119,8 +120,13 @@ object Crypto {
             quarter(w, 0, 5, 10, 15); quarter(w, 1, 6, 11, 12)
             quarter(w, 2, 7, 8, 13); quarter(w, 3, 4, 9, 14)
         }
+        // HChaCha20 output = the raw round output words 0..3 ‖ 12..15.
+        // CRITICAL: unlike regular ChaCha20's output function, HChaCha20 does NOT
+        // add the original state back (no feed-forward). This must match the
+        // RFC-standard XChaCha20 used on the desktop (chacha20poly1305 crate).
         val out = ByteArray(32)
-        for (i in 0..7) putLe32(out, i * 4, w[i] + st[i])
+        for (i in 0..3) putLe32(out, i * 4, w[i])
+        for (i in 0..3) putLe32(out, 16 + i * 4, w[12 + i])
         return out
     }
 
