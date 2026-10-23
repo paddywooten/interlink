@@ -16,6 +16,7 @@ Two components, one encrypted protocol:
 - 📞 Phone calls — dial pad, answer/decline, audio relay with selectable laptop microphone
 - 📋 Clipboard sharing (both directions)
 - 🔊 Ring my phone, battery status, device info
+- 🌐 Nearby devices — see InterLink phones and laptops on the same Wi-Fi automatically
 
 ## How it works
 

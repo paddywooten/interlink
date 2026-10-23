@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import type {
   CallState,
   NotifItem,
+  SeenDevice,
   Status,
   Toast,
   Transfer,
@@ -23,6 +24,8 @@ export interface AppState {
   toasts: Toast[];
   qrModal: boolean;
   recentFiles: { name: string; path: string; when: number }[];
+  /** Devices discovered on the LAN via UDP beacons. */
+  devices: SeenDevice[];
 }
 
 let state: AppState = {
@@ -38,6 +41,7 @@ let state: AppState = {
   toasts: [],
   qrModal: false,
   recentFiles: [],
+  devices: [],
 };
 
 const listeners = new Set<() => void>();
@@ -90,4 +94,8 @@ export function addRecentFile(name: string, path: string) {
   setState({
     recentFiles: [{ name, path, when: Date.now() }, ...getState().recentFiles].slice(0, 20),
   });
+}
+
+export function setDevices(devices: SeenDevice[]) {
+  setState({ devices });
 }

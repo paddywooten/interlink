@@ -10,6 +10,22 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub const DEFAULT_PORT: u16 = 27341;
+/// UDP port for LAN device-presence beacons (kept separate from the connect
+/// path on DEFAULT_PORT so discovery never disturbs an active pairing).
+pub const BEACON_PORT: u16 = 27342;
+
+/// A device seen on the LAN via periodic `ILANN` beacons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeenDevice {
+    pub name: String,
+    /// "laptop" or "phone".
+    pub role: String,
+    pub ip: String,
+    /// TCP port the device's link server/client listens on.
+    pub port: u16,
+    /// Unix millis when this device was last heard.
+    pub last_seen: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -98,6 +114,8 @@ pub struct Conn {
     pub tx: mpsc::Sender<Vec<u8>>,
     pub peer: PeerInfo,
     pub session_key: FrameKey,
+    /// Remote address, also used to keep the connected phone in the LAN device list.
+    pub ip: String,
 }
 
 /// A laptop-initiated transfer (tid → name) so the phone's completion pushes
@@ -122,6 +140,8 @@ pub struct Inner {
     pub server_running: bool,
     /// Active call audio relay (if any).
     pub call_audio: Option<crate::audio::CallAudioHandle>,
+    /// Devices seen on the LAN via beacons, keyed by ip:port.
+    pub devices: HashMap<String, crate::state::SeenDevice>,
 }
 
 pub struct AppState {
@@ -144,6 +164,7 @@ impl AppState {
                 outgoing: HashMap::new(),
                 server_running: false,
                 call_audio: None,
+                devices: HashMap::new(),
             }),
             events,
         })

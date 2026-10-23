@@ -16,6 +16,7 @@ import {
   getState,
   removeNotification,
   setState,
+  setDevices,
   toast,
   upsertTransfer,
   useStore,
@@ -38,6 +39,13 @@ export default function App() {
       } catch (e) {
         console.error("status failed", e);
       }
+      try {
+        const devs = await api.getDevices();
+        if (!alive) return;
+        setState({ devices: devs });
+      } catch (e) {
+        // non-fatal — device list is a convenience panel
+      }
     };
     refresh();
     const iv = setInterval(refresh, 5000);
@@ -56,6 +64,11 @@ export default function App() {
         }
         refresh();
         if (!connectedNow) setState({ call: null });
+        return;
+      }
+      if (ev.kind === "devices") {
+        // LAN device list changed — pull the fresh list.
+        api.getDevices().then(setDevices).catch(() => undefined);
         return;
       }
       if (ev.kind === "progress") {

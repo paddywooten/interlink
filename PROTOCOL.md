@@ -17,6 +17,13 @@ The phone always dials the laptop (laptop is on the LAN, usually plugged in).
   the source address and the port; the name field is informational).
   The phone remembers the last successful `ip:port` after pairing and retries it
   first, falling back to discovery when it stops answering.
+- LAN presence: every phone and laptop broadcasts
+  `ILANN|<base64url(device name)>|<role>|<port>` on UDP **27342** every 3 seconds,
+  where `role` is `phone` or `laptop`. Receivers key the device list by sender IP
+  and advertised port and expire entries not heard for 15 seconds. This channel is
+  unauthenticated and carries no secrets; it is only used to display nearby devices.
+  A successfully paired phone is also registered through its encrypted link, so the
+  connected device remains visible even when a firewall blocks UDP 27342.
 
 ## 2. Cryptography
 

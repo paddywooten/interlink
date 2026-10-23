@@ -43,6 +43,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.interlink.app.core.LinkState
+import com.interlink.app.core.LanDiscovery
 import com.interlink.app.core.Prefs
 import com.interlink.app.service.LinkService
 import kotlinx.coroutines.launch
@@ -100,6 +101,7 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val state by LinkService.state.collectAsState()
     val detail by LinkService.stateDetail.collectAsState()
+    val discovered by LanDiscovery.devices.collectAsState()
     // Local non-delegated copy: delegated properties can't be smart-cast.
     val statusDetail: String? = detail
 
@@ -148,6 +150,42 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { LinkService.start(context) }) { Text("Start link service") }
             OutlinedButton(onClick = { LinkService.stop(context) }) { Text("Stop") }
+        }
+
+        Card(colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface,
+        )) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Devices on this network", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.padding(4.dp))
+                if (discovered.isEmpty()) {
+                    Text(
+                        "Searching… Open InterLink on your other devices and keep everything on the same Wi-Fi.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    discovered.forEach { device ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Column {
+                                Text(device.name, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${device.ip}:${device.port}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            Text(
+                                if (device.role == "laptop") "Laptop" else "Phone",
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                        Spacer(Modifier.padding(5.dp))
+                    }
+                }
+            }
         }
 
         Text("Permissions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)

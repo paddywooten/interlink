@@ -27,6 +27,7 @@ pub async fn start(state: SharedState, app: tauri::AppHandle) -> Result<(), Stri
     }
 
     tokio::spawn(discovery_responder(state.clone(), port));
+    tokio::spawn(beacon_service(state.clone(), port));
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -69,6 +70,82 @@ async fn discovery_responder(state: SharedState, port: u16) {
                 let name = state.inner.lock().await.cfg.device_name.clone();
                 let reply = format!("ILHERE|{}|{}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name), port);
                 let _ = sock.send_to(reply.as_bytes(), from).await;
+            }
+        }
+    }
+}
+
+/// Periodically announce this laptop on the LAN and record peers that do the
+/// same, so the UI can show every InterLink device on the current network.
+/// Runs on its own UDP port (BEACON_PORT) so it never disturbs the connect
+/// handshake on the main link port.
+async fn beacon_service(state: SharedState, link_port: u16) {
+    let sock = match UdpSocket::bind(("0.0.0.0", crate::state::BEACON_PORT)).await {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("beacon discovery disabled: {e}");
+            return;
+        }
+    };
+    let _ = sock.set_broadcast(true);
+    let mut buf = [0u8; 512];
+    let mut tick = tokio::time::interval(Duration::from_secs(3));
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {
+                let name = state.inner.lock().await.cfg.device_name.clone();
+                let msg = format!(
+                    "ILANN|{}|laptop|{}",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(name),
+                    link_port
+                );
+                let _ = sock.send_to(msg.as_bytes(), ("255.255.255.255", crate::state::BEACON_PORT)).await;
+                // Drop devices we haven't heard from in ~15s.
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let mut inner = state.inner.lock().await;
+                let connected_ip = inner.conn.as_ref().map(|c| c.ip.clone());
+                inner.devices.retain(|_, d| {
+                    connected_ip.as_deref() == Some(d.ip.as_str())
+                        || now.saturating_sub(d.last_seen) < 15_000
+                });
+            }
+            res = sock.recv_from(&mut buf) => {
+                let Ok((n, from)) = res else { continue };
+                let Ok(text) = std::str::from_utf8(&buf[..n]) else { continue };
+                // ILANN|<b64 name>|<role>|<port>
+                let mut parts = text.split('|');
+                if parts.next() != Some("ILANN") { continue }
+                let Some(name_b64) = parts.next() else { continue };
+                let Some(role) = parts.next() else { continue };
+                let Some(port) = parts.next().and_then(|p| p.parse::<u16>().ok()) else { continue };
+                let name = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(name_b64)
+                    .map(|b| String::from_utf8_lossy(&b).to_string())
+                    .unwrap_or_else(|_| "unknown".into());
+                let ip = from.ip().to_string();
+                // Ignore our own beacons (loopback of the broadcast).
+                if role == "laptop" && ip == crate::state::local_ip().unwrap_or_default() { continue }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let key = format!("{ip}:{port}");
+                let mut inner = state.inner.lock().await;
+                let is_new = !inner.devices.contains_key(&key);
+                if is_new {
+                    log::info!("discovered {role} {name} at {ip}:{port}");
+                }
+                inner.devices.insert(key, crate::state::SeenDevice {
+                    name, role: role.into(), ip, port, last_seen: now,
+                });
+                drop(inner);
+                // Notify the frontend only when the set of devices changes.
+                if is_new {
+                    state.emit("devices", json!({ "changed": true }));
+                }
             }
         }
     }
@@ -175,8 +252,37 @@ async fn handle_connection(
         }
         inner.data_collectors.clear();
         inner.outgoing.clear();
-        inner.conn = Some(Conn { tx: out_tx.clone(), peer: peer.clone(), session_key: session_key.clone() });
+        let peer_ip = peer_addr.ip().to_string();
+        let device_port = inner.cfg.port;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        // The encrypted link is also a presence signal. This keeps the phone
+        // visible even if a laptop firewall blocks the UDP beacon port.
+        let device_key = format!("{peer_ip}:{device_port}");
+        let is_new = !inner.devices.contains_key(&device_key);
+        if is_new {
+            log::info!("discovered phone {} at {peer_ip}:{device_port} (link)", peer.name);
+        }
+        inner.devices.insert(
+            device_key,
+            crate::state::SeenDevice {
+                name: peer.name.clone(),
+                role: "phone".into(),
+                ip: peer_ip.clone(),
+                port: device_port,
+                last_seen: now,
+            },
+        );
+        inner.conn = Some(Conn {
+            tx: out_tx.clone(),
+            peer: peer.clone(),
+            session_key: session_key.clone(),
+            ip: peer_ip,
+        });
     }
+    state.emit("devices", json!({ "changed": true }));
     state.emit("conn", json!({ "connected": true, "peer": peer }));
     log::info!("phone connected: {} ({})", peer.name, peer.model);
 

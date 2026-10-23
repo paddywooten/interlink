@@ -9,6 +9,7 @@ export default function Dashboard() {
   const linkError = useStore((s) => s.linkError);
   const transfers = useStore((s) => s.transfers);
   const recent = useStore((s) => s.recentFiles);
+  const devices = useStore((s) => s.devices);
   const [ringing, setRinging] = useState(false);
   const [clipText, setClipText] = useState("");
 
@@ -182,6 +183,33 @@ export default function Dashboard() {
                 </button>
               </div>
             ))}
+          </div>
+
+          <div className="card">
+            <div className="card-title">Devices on this network</div>
+            {devices.length === 0 ? (
+              <div className="muted">
+                No other InterLink devices found yet. Make sure the phone and laptop are on the
+                same Wi-Fi; devices appear automatically within a few seconds.
+              </div>
+            ) : (
+              devices.map((d) => (
+                <div className="device-row" key={`${d.ip}:${d.port}`}>
+                  <div className="device-row-main">
+                    <span className="device-row-icon">{d.role === "phone" ? "📱" : "💻"}</span>
+                    <div>
+                      <div className="device-row-name">{d.name}</div>
+                      <div className="muted mono">
+                        {d.ip}:{d.port}
+                      </div>
+                    </div>
+                  </div>
+                  <span className={`badge ${d.role === "phone" ? "ok" : ""}`}>
+                    {d.role === "phone" ? "Phone" : "Laptop"}
+                  </span>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="card">

@@ -23,12 +23,17 @@ Known quirk: WebKitGTK on some GPU/driver combos crashes at window creation
 (`Error 71 (Protocol error)`); `src/lib.rs` already sets
 `WEBKIT_DISABLE_DMABUF_RENDERER=1` as the official workaround.
 
-Firewall: the app listens on TCP **27341** and UDP discovery (27341) and the
-phone must reach it. If your distro firewall is on, open the port:
+Firewall: the app listens on TCP **27341**, UDP discovery on **27341**, and LAN
+presence beacons on UDP **27342**. The phone must be able to reach them. If your
+distro firewall is on, open the ports (the beacon port is optional if you only
+need the paired connection, but is required to discover other unpaired devices):
 
 ```bash
-sudo ufw allow 27341/tcp            # ufw
-sudo firewall-cmd --add-port=27341/tcp --permanent && sudo firewall-cmd --reload
+sudo ufw allow 27341/tcp            # encrypted phone ↔ laptop link
+sudo ufw allow 27341/udp            # pairing endpoint discovery
+sudo ufw allow 27342/udp            # nearby-device list
+sudo firewall-cmd --add-port=27341/tcp --add-port=27341/udp --add-port=27342/udp --permanent
+sudo firewall-cmd --reload
 ```
 
 ## Windows 10/11
@@ -61,7 +66,9 @@ otherwise "connect and retry" forever.
 If the phone still can't reach the laptop, allow the port manually:
 
 ```powershell
-netsh advfirewall firewall add rule name="InterLink" dir=in action=allow protocol=TCP localport=27341
+netsh advfirewall firewall add rule name="InterLink Link" dir=in action=allow protocol=TCP localport=27341
+netsh advfirewall firewall add rule name="InterLink Discovery" dir=in action=allow protocol=UDP localport=27341
+netsh advfirewall firewall add rule name="InterLink Nearby" dir=in action=allow protocol=UDP localport=27342
 ```
 
 Notes:

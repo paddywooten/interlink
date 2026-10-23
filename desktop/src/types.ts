@@ -13,6 +13,15 @@ export interface Peer {
   battery?: Battery | null;
 }
 
+/** A device discovered on the LAN via UDP beacons. */
+export interface SeenDevice {
+  name: string;
+  role: "laptop" | "phone" | string;
+  ip: string;
+  port: number;
+  last_seen: number;
+}
+
 export interface Status {
   paired: boolean;
   connected: boolean;

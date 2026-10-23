@@ -529,6 +529,38 @@ nav {
   font-size: 13px;
 }
 
+.device-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.device-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.device-row-icon {
+  font-size: 22px;
+}
+
+.device-row-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.device-row .badge {
+  flex: 0 0 auto;
+  margin-left: 0;
+}
+
 /* ============ Tabs ============ */
 .tabs {
   display: flex;

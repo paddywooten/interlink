@@ -30,6 +30,18 @@ pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> 
     }))
 }
 
+/// Devices discovered on the LAN via UDP beacons.
+#[tauri::command]
+pub async fn get_devices(state: State<'_, SharedState>) -> Result<Value, String> {
+    let inner = state.inner.lock().await;
+    let mut list: Vec<crate::state::SeenDevice> =
+        inner.devices.values().cloned().collect();
+    drop(inner);
+    // Deterministic order (laptops first, then name) for a stable UI.
+    list.sort_by(|a, b| a.role.cmp(&b.role).then(a.name.cmp(&b.name)));
+    Ok(json!({ "devices": list }))
+}
+
 /// Create (or rotate) the pairing QR code.
 #[tauri::command]
 pub async fn get_pairing_qr(state: State<'_, SharedState>, rotate: Option<bool>) -> Result<Value, String> {

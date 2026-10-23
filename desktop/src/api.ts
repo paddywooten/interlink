@@ -5,6 +5,7 @@ import type {
   Contact,
   MediaItem,
   NotifItem,
+  SeenDevice,
   SmsMessage,
   SmsThread,
   Status,
@@ -19,6 +20,8 @@ export const unpair = () => invoke("unpair");
 export const listAudioInputs = () =>
   invoke<{ devices: { name: string; default: boolean }[] }>("list_audio_inputs");
 export const getSettings = () => invoke<Record<string, unknown>>("get_settings");
+export const getDevices = () =>
+  invoke<{ devices: SeenDevice[] }>("get_devices").then((r) => r.devices);
 export const setSettings = (patch: Record<string, unknown>) =>
   invoke<Record<string, unknown>>("set_settings", { patch });
 export const pickDirectory = () =>
@@ -79,7 +82,7 @@ export const clipGet = () => req<{ text: string; ts: number }>("clip.get").catch
 // ——— Events ———
 
 export interface EvPayload {
-  kind: "conn" | "push" | "progress";
+  kind: "conn" | "push" | "progress" | "devices";
   data: any;
 }
 
