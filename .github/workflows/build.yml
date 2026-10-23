@@ -44,7 +44,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
             libayatana-appindicator3-dev librsvg2-dev libssl-dev \
-            build-essential curl wget file libxdo-dev
+            libasound2-dev build-essential curl wget file libxdo-dev
 
       - name: install frontend deps
         working-directory: desktop
@@ -90,9 +90,19 @@ jobs:
 
       - name: setup android sdk
         uses: android-actions/setup-android@v3
+        with:
+          # cmdline-tools 16 dropped the legacy "tools" package the action used to
+          # install by default (it now errors with "Failed to find package 'tools'").
+          # Install a still-valid package; Gradle auto-downloads the SDK 35
+          # platform/build-tools it needs once licenses are accepted.
+          packages: "platform-tools"
 
       - name: gradle cache
         uses: gradle/actions/setup-gradle@v4
+
+      - name: crypto unit tests (RFC vectors)
+        working-directory: android
+        run: ./gradlew testDebugUnitTest --console=plain
 
       - name: build debug apk
         working-directory: android
