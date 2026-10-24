@@ -32,22 +32,82 @@ export const revealInFolder = (path: string) =>
   invoke("reveal_in_folder", { path });
 export const mediaThumb = (id: string, w = 320) =>
   invoke<{ data: string; mime: string }>("media_thumb", { id, w });
-export const mediaDownload = (id: string, suggested?: string) =>
-  invoke<{ ok: boolean }>("media_download", { id, suggested });
+export const mediaDownload = (id: string, suggested?: string, subdir?: string) =>
+  invoke<{ ok: boolean; path: string; size: number }>("media_download", {
+    id,
+    suggested,
+    subdir,
+  });
 /** Kick off screen mirroring: the phone shows its MediaProjection consent
  * dialog, then streams `mirror.frame` pushes and reports lifecycle via
  * `mirror.state` pushes. */
 export const mirrorStart = (w = 720, fps = 8) =>
   invoke<{ status: string }>("mirror_start", { w, fps });
 export const mirrorStop = () => invoke<{ ok: boolean }>("mirror_stop");
-export const fileSend = (path: string) =>
-  invoke<{ ok: boolean; size: number }>("file_send", { path });
-export const callAudioStart = (callId: string, mic?: string) =>
-  invoke("call_audio_start", { callId, mic });
+/** `dest:"media"` puts the file straight into the phone's photo/video
+ * library instead of Downloads/InterLink. Resolves once the phone confirms
+ * it finished writing. */
+export const fileSend = (path: string, dest?: string) =>
+  invoke<{ ok: boolean; size: number; completed: boolean; name: string }>(
+    "file_send",
+    { path, dest },
+  );
+export const listAudioOutputs = () =>
+  invoke<{ devices: { name: string; default: boolean }[] }>("list_audio_outputs");
+/** Start the call audio relay. `uplink` = speak through the laptop,
+ * `downlink` = hear through the laptop; both false keeps the call on the
+ * phone. `PHONE` device values are handled by the caller. */
+export const callAudioStart = (
+  callId: string,
+  opts: {
+    mic?: string;
+    speaker?: string;
+    uplink?: boolean;
+    downlink?: boolean;
+  } = {},
+) => invoke("call_audio_start", { callId, ...opts });
 export const callAudioStop = (callId?: string) =>
   invoke("call_audio_stop", { callId });
 export const callMute = (muted: boolean) =>
   invoke<{ muted: boolean }>("call_mute", { muted });
+
+// ——— Connection (USB / WiFi) ———
+export const connectionRefresh = () =>
+  invoke<{
+    connection: string;
+    adbDevice: string | null;
+    transport: "usb" | "wifi" | null;
+  }>("connection_refresh");
+
+// ——— Remote app install ———
+export const pickApk = () =>
+  invoke<{ path: string | null }>("pick_apk").then((r) => r.path);
+
+// ——— Backup / restore ———
+export const backupStart = (sections: string[], outDir?: string) =>
+  invoke<{ ok: boolean; path: string; contacts: number; sms: number; photos: number }>(
+    "backup_start",
+    { sections, outDir },
+  );
+export const backupRestore = (dir: string) =>
+  invoke<{
+    ok: boolean;
+    contacts: number;
+    skipped: number;
+    media: number;
+    mediaFailed: number;
+    sms: { imported?: number; blocked?: boolean; error?: string } | null;
+  }>("backup_restore", { dir });
+export const backupList = (dir: string) =>
+  invoke<{
+    path: string;
+    manifest: Record<string, unknown> | null;
+    contacts: boolean;
+    sms: boolean;
+    media: number;
+  }>("backup_list", { dir });
+export const pickBackupDir = () =>
+  invoke<{ path: string | null }>("pick_backup_dir").then((r) => r.path);
 
 /** Generic protocol request to the phone. Resolves with the response payload. */
 export async function req<T = unknown>(

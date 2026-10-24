@@ -14,6 +14,10 @@ use tauri::State;
 pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> {
     let inner = state.inner.lock().await;
     let ip = crate::state::local_ip();
+    let transport = inner
+        .conn
+        .as_ref()
+        .map(|c| crate::state::transport_of(&c.ip));
     Ok(json!({
         "paired": inner.cfg.secret_b64.is_some(),
         "connected": inner.conn.is_some(),
@@ -23,6 +27,10 @@ pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> 
         "port": inner.cfg.port,
         "deviceName": inner.cfg.device_name,
         "micDevice": inner.cfg.mic_device,
+        "speakerDevice": inner.cfg.speaker_device,
+        "connection": inner.cfg.connection_mode(),
+        "transport": transport,
+        "adbDevice": inner.adb_device,
         "clipboardEnabled": inner.cfg.clipboard_enabled,
         "autoAcceptFiles": inner.cfg.auto_accept_files,
         "downloadDir": inner.cfg.download_dir,
@@ -141,29 +149,46 @@ pub async fn media_thumb(state: State<'_, SharedState>, id: String, w: Option<u3
 }
 
 /// Download a photo/video from the phone into the InterLink folder.
+/// Returns the on-disk path so the UI can play videos through the asset URL.
 #[tauri::command]
 pub async fn media_download(
     state: State<'_, SharedState>,
     app: tauri::AppHandle,
     id: String,
     suggested: Option<String>,
+    subdir: Option<String>,
 ) -> Result<Value, String> {
     let tid = crypto::new_transfer_id();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
     state.inner.lock().await.data_collectors.insert(tid, tx);
 
-    let dl_dir = { state.inner.lock().await.cfg.download_dir.clone() };
+    let dl_dir = {
+        let base = state.inner.lock().await.cfg.download_dir.clone();
+        // `subdir` is internal (backup folders); keep it under the base dir.
+        match subdir {
+            Some(s) if !s.is_empty() => {
+                let root = base
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(server::default_download_dir);
+                Some(root.join(s).display().to_string())
+            }
+            _ => base,
+        }
+    };
+    let tid_label = b64u(&tid);
     let result = async {
         let d = state
-            .request_json("media.get", json!({ "id": id, "tid": b64u(&tid) }))
+            .request_json("media.get", json!({ "id": id, "tid": tid_label }))
             .await?;
         let size = d["size"].as_u64().unwrap_or(0);
         let name = suggested
             .or_else(|| d["name"].as_str().map(String::from))
             .unwrap_or_else(|| format!("media_{id}"));
         let mime = d["mime"].as_str().unwrap_or("application/octet-stream").to_string();
-        server::assemble_incoming(&state, tid, size, name, mime, dl_dir, &mut rx).await;
-        Ok::<Value, String>(json!({ "ok": true }))
+        let path =
+            server::assemble_incoming(&state, tid, size, name, mime, dl_dir, &mut rx).await;
+        let path = path.display().to_string();
+        Ok::<Value, String>(json!({ "ok": true, "path": path, "tid": tid_label, "size": size }))
     }
     .await;
     state.inner.lock().await.data_collectors.remove(&tid);
@@ -197,16 +222,28 @@ pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String>
     Ok(d)
 }
 
-/// Send a local file to the phone. Streams chunks; phone replies file.done push.
+/// Send a local file to the phone. Streams chunks, then waits for the phone
+/// to confirm it finished writing — callers (remote APK install, restore)
+/// rely on the file actually existing on the phone, not just having left the
+/// socket. `dest:"media"` restores straight into the photo/video library.
 #[tauri::command]
-pub async fn file_send(state: State<'_, SharedState>, path: String) -> Result<Value, String> {
+pub async fn file_send(
+    state: State<'_, SharedState>,
+    path: String,
+    dest: Option<String>,
+) -> Result<Value, String> {
+    send_file(&state, &path, dest.as_deref().unwrap_or("download")).await
+}
+
+/// Reusable core (also drives backup restore, which replays whole folders).
+pub async fn send_file(state: &SharedState, path: &str, dest: &str) -> Result<Value, String> {
     use tokio::io::AsyncReadExt;
-    let meta = tokio::fs::metadata(&path).await.map_err(|e| format!("internal: {e}"))?;
+    let meta = tokio::fs::metadata(path).await.map_err(|e| format!("internal: {e}"))?;
     if meta.is_dir() {
         return Err("internal: is a directory".into());
     }
     let size = meta.len();
-    let name = std::path::Path::new(&path)
+    let name = std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file.bin".into());
@@ -222,23 +259,29 @@ pub async fn file_send(state: State<'_, SharedState>, path: String) -> Result<Va
         .await
         .outgoing
         .insert(tid, Outgoing { name: name.clone(), done: false });
+    // Reserve the completion wake-up before offering: the phone may push
+    // `transfer.done` the instant we start streaming.
+    let waiter_key = crate::state::waiter_key("filedone", &b64u(&tid));
+    let waiter = state.add_waiter(waiter_key.clone()).await;
     let resp = match state
         .request(
             "file.offer",
-            json!({ "tid": b64u(&tid), "name": name, "mime": mime, "size": size, "chunks": chunks, "dest": "download" }),
+            json!({ "tid": b64u(&tid), "name": name, "mime": mime, "size": size, "chunks": chunks, "dest": dest }),
             Duration::from_secs(15),
         )
         .await
     {
         Ok(r) => r,
         Err(e) => {
-            state.inner.lock().await.outgoing.remove(&tid);
+            let mut inner = state.inner.lock().await;
+            inner.outgoing.remove(&tid);
+            inner.waiters.remove(&waiter_key);
             return Err(e);
         }
     };
     let _ = resp;
 
-    let mut file = tokio::fs::File::open(&path).await.map_err(|e| format!("internal: {e}"))?;
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| format!("internal: {e}"))?;
     let mut buf = vec![0u8; 64 * 1024];
     let mut seq: u32 = 0;
     let mut sent: u64 = 0;
@@ -248,6 +291,9 @@ pub async fn file_send(state: State<'_, SharedState>, path: String) -> Result<Va
             break;
         }
         if !state.send_data_frame(tid, seq, &buf[..n]).await {
+            let mut inner = state.inner.lock().await;
+            inner.outgoing.remove(&tid);
+            inner.waiters.remove(&waiter_key);
             return Err("offline: connection lost mid-transfer".into());
         }
         seq += 1;
@@ -257,9 +303,18 @@ pub async fn file_send(state: State<'_, SharedState>, path: String) -> Result<Va
         }
     }
     state.emit("progress", json!({ "tid": b64u(&tid), "received": sent, "total": size }));
-    // Completion arrives asynchronously: the phone pushes transfer.done /
-    // file.done, which dispatch_envelope correlates via `outgoing`.
-    Ok(json!({ "ok": true, "size": sent }))
+
+    // The phone pushes transfer.done / file.done once it has flushed to disk.
+    let wait_secs = (60 + size / (1024 * 1024)).min(600);
+    let completed = match tokio::time::timeout(Duration::from_secs(wait_secs), waiter).await {
+        Ok(Ok(v)) => v["ok"].as_bool().unwrap_or(false),
+        Ok(Err(_)) => false,
+        Err(_) => {
+            state.inner.lock().await.waiters.remove(&waiter_key);
+            false
+        }
+    };
+    Ok(json!({ "ok": true, "size": sent, "completed": completed, "tid": b64u(&tid), "name": name }))
 }
 
 fn guess_mime(name: &str) -> String {
@@ -295,13 +350,30 @@ pub async fn list_audio_inputs() -> Result<Value, String> {
     Ok(json!({ "devices": audio::list_inputs() }))
 }
 
+/// Output devices for the far end of a call (laptop speakers, Bluetooth
+/// speakers, HDMI, …) — the "Hear through" picker.
+#[tauri::command]
+pub async fn list_audio_outputs() -> Result<Value, String> {
+    Ok(json!({ "devices": audio::list_outputs() }))
+}
+
 /// Start call audio relay for an active call (negotiates with the phone).
+///
+/// `uplink` (speak through the laptop) and `downlink` (hear through the
+/// laptop) are independent; both false keeps the call entirely on the phone.
 #[tauri::command]
 pub async fn call_audio_start(
     state: State<'_, SharedState>,
     call_id: String,
     mic: Option<String>,
+    speaker: Option<String>,
+    uplink: Option<bool>,
+    downlink: Option<bool>,
 ) -> Result<Value, String> {
+    // Serialize with any concurrent start/stop so two quick changes can't both
+    // find `call_audio` empty and both start a relay (the loser's handle would
+    // be overwritten, leaving its mic stream open with nothing draining it).
+    let _gate = state.call_audio_gate.lock().await;
     // Stop any previous relay. The lock guard must be released before
     // `audio::stop` runs — `audio::stop` takes the same lock (tokio Mutex
     // guards in `if let` scrutinees live until the end of the whole block).
@@ -311,14 +383,26 @@ pub async fn call_audio_start(
         drop(old);
         audio::stop(&state, &old_id).await;
     }
-    let mic = match mic {
-        Some(m) => Some(m),
-        None => state.inner.lock().await.cfg.mic_device.clone(),
+    let (mic, speaker, uplink, downlink) = {
+        let inner = state.inner.lock().await;
+        (
+            mic.or_else(|| inner.cfg.mic_device.clone()),
+            speaker.or_else(|| inner.cfg.speaker_device.clone()),
+            uplink.unwrap_or(true),
+            downlink.unwrap_or(true),
+        )
     };
-    match audio::start_negotiated(&state, &call_id, mic).await {
+    if !uplink && !downlink {
+        // Nothing to relay: the phone handles both directions itself.
+        return Ok(json!({ "ok": true, "mode": "phone" }));
+    }
+    match audio::start_negotiated(&state, &call_id, mic, speaker, uplink, downlink).await {
         Ok(handle) => {
             state.inner.lock().await.call_audio = Some(handle);
-            Ok(json!({ "ok": true }))
+            Ok(json!({
+                "ok": true,
+                "mode": if uplink && downlink { "relay" } else if downlink { "hear_laptop" } else { "speak_laptop" },
+            }))
         }
         Err(e) => Err(e),
     }
@@ -326,6 +410,9 @@ pub async fn call_audio_start(
 
 #[tauri::command]
 pub async fn call_audio_stop(state: State<'_, SharedState>, call_id: Option<String>) -> Result<Value, String> {
+    // Same gate as `call_audio_start`: a stop must not slip in between another
+    // start's "take old" and "store new" steps.
+    let _gate = state.call_audio_gate.lock().await;
     let handle = state.inner.lock().await.call_audio.take();
     let call_id = call_id.or_else(|| handle.as_ref().map(|h| h.call_id.clone()));
     drop(handle);
@@ -357,6 +444,7 @@ pub async fn get_settings(state: State<'_, SharedState>) -> Result<Value, String
 
 #[tauri::command]
 pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result<Value, String> {
+    let mut connection_changed = false;
     {
         let mut inner = state.inner.lock().await;
         if let Some(obj) = patch.as_object() {
@@ -364,6 +452,18 @@ pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result
                 match k.as_str() {
                     "device_name" => inner.cfg.device_name = v.as_str().unwrap_or("Laptop").into(),
                     "mic_device" => inner.cfg.mic_device = v.as_str().map(String::from),
+                    "speaker_device" => inner.cfg.speaker_device = v.as_str().map(String::from),
+                    "connection" => {
+                        let want = match v.as_str().unwrap_or("auto") {
+                            "usb" => "usb",
+                            "wifi" => "wifi",
+                            _ => "auto",
+                        };
+                        if inner.cfg.connection != want {
+                            inner.cfg.connection = want.into();
+                            connection_changed = true;
+                        }
+                    }
                     "clipboard_enabled" => inner.cfg.clipboard_enabled = v.as_bool().unwrap_or(true),
                     "auto_accept_files" => inner.cfg.auto_accept_files = v.as_bool().unwrap_or(true),
                     "download_dir" => inner.cfg.download_dir = v.as_str().map(String::from),
@@ -373,7 +473,83 @@ pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result
         }
     }
     state.save_config().await;
+    if connection_changed {
+        // Apply the tunnel now (don't wait for the ticker) and drop the link
+        // so the phone re-handshakes onto the preferred route — it only tries
+        // 127.0.0.1 while disconnected.
+        crate::connection::tick(&state).await;
+        state.clear_connection().await;
+        state.emit("conn", json!({ "connected": false }));
+    }
     get_settings(state).await
+}
+
+/// Re-scan for a USB device and re-apply the reverse tunnel on demand.
+#[tauri::command]
+pub async fn connection_refresh(state: State<'_, SharedState>) -> Result<Value, String> {
+    crate::connection::tick(&state).await;
+    let inner = state.inner.lock().await;
+    let transport = inner
+        .conn
+        .as_ref()
+        .map(|c| crate::state::transport_of(&c.ip));
+    Ok(json!({
+        "connection": inner.cfg.connection_mode(),
+        "adbDevice": inner.adb_device,
+        "transport": transport,
+    }))
+}
+
+/// Pick an .apk to push to the phone (remote app install).
+#[tauri::command]
+pub async fn pick_apk() -> Result<Value, String> {
+    let file = rfd::AsyncFileDialog::new()
+        .set_title("Choose an Android package")
+        .add_filter("Android package", &["apk"])
+        .pick_file()
+        .await;
+    Ok(match file {
+        Some(f) => json!({ "path": f.path().display().to_string() }),
+        None => json!({ "path": null }),
+    })
+}
+
+/// Create a backup folder on this laptop: contacts (vCard), SMS (JSON) and
+/// every photo/video the phone will hand over.
+#[tauri::command]
+pub async fn backup_start(
+    state: State<'_, SharedState>,
+    sections: Option<Vec<String>>,
+    out_dir: Option<String>,
+) -> Result<Value, String> {
+    let sections =
+        sections.unwrap_or_else(|| vec!["contacts".into(), "sms".into(), "photos".into()]);
+    crate::backup::start(&state, sections, out_dir).await
+}
+
+/// Replay a backup folder onto the phone.
+#[tauri::command]
+pub async fn backup_restore(state: State<'_, SharedState>, dir: String) -> Result<Value, String> {
+    crate::backup::restore(&state, dir).await
+}
+
+/// Describe a backup folder so the UI can show what a restore will restore.
+#[tauri::command]
+pub async fn backup_list(dir: String) -> Result<Value, String> {
+    crate::backup::list(dir).await
+}
+
+/// Pick a folder to back up into / restore from.
+#[tauri::command]
+pub async fn pick_backup_dir() -> Result<Value, String> {
+    let dir = rfd::AsyncFileDialog::new()
+        .set_title("Choose a backup folder")
+        .pick_folder()
+        .await;
+    Ok(match dir {
+        Some(d) => json!({ "path": d.path().display().to_string() }),
+        None => json!({ "path": null }),
+    })
 }
 
 /// Pick a directory with a native dialog.

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import * as api from "../api";
 import type { MediaItem } from "../types";
 import { addRecentFile, toast, useStore } from "../store";
@@ -21,6 +22,8 @@ export default function Gallery() {
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [lightbox, setLightbox] = useState<MediaItem | null>(null);
   const [fullSrc, setFullSrc] = useState<string | null>(null);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoLoading, setVideoLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const sentinel = useRef<HTMLDivElement>(null);
   const thumbTokens = useRef(0);
@@ -34,9 +37,13 @@ export default function Gallery() {
         setTotal(r.total ?? 0);
         setItems((prev) => (reset ? r.items : [...prev, ...r.items]));
         setOffset(from + r.items.length);
-        // Prime thumbnails for the new page (3 workers)
+        // Prime thumbnails for the new page (3 workers). Videos get one too —
+        // MediaStore generates them, and without a poster the grid is a wall
+        // of identical ▶ placeholders.
         const token = ++thumbTokens.current;
-        const pending = r.items.filter((i) => i.mime.startsWith("image/"));
+        const pending = r.items.filter(
+          (i) => i.mime.startsWith("image/") || i.mime.startsWith("video/"),
+        );
         let idx = 0;
         const worker = async () => {
           while (idx < pending.length) {
@@ -87,12 +94,28 @@ export default function Gallery() {
   const openItem = async (item: MediaItem) => {
     setLightbox(item);
     setFullSrc(null);
+    setVideoSrc(null);
+    setVideoLoading(false);
     if (item.mime.startsWith("image/")) {
       try {
         const t = await api.mediaThumb(item.id, 1600);
         setFullSrc(`data:${t.mime};base64,${t.data}`);
       } catch {
         setFullSrc(thumbs[item.id] ?? null);
+      }
+    } else if (item.mime.startsWith("video/")) {
+      // Pull the file down once, then play it from the asset URL — the
+      // webview can't stream over the link protocol, and a 200 MB base64
+      // blob would be much worse than a disk read.
+      setVideoLoading(true);
+      try {
+        const r = await api.mediaDownload(item.id, item.name);
+        addRecentFile(item.name, r.path);
+        setVideoSrc(convertFileSrc(r.path));
+      } catch (e) {
+        toast(String(e), "error");
+      } finally {
+        setVideoLoading(false);
       }
     }
   };
@@ -101,9 +124,9 @@ export default function Gallery() {
     if (!lightbox) return;
     setSaving(true);
     try {
-      await api.mediaDownload(lightbox.id, lightbox.name);
-      addRecentFile(lightbox.name, "~/InterLink");
-      toast("Saved to ~/InterLink", "success");
+      const r = await api.mediaDownload(lightbox.id, lightbox.name);
+      addRecentFile(lightbox.name, r.path);
+      toast(`Saved to ${r.path}`, "success");
     } catch (e) {
       toast(String(e), "error");
     } finally {
@@ -161,8 +184,11 @@ export default function Gallery() {
           <div className="grid-media">
             {items.map((m) => (
               <div key={m.id} className="media-cell" onClick={() => openItem(m)}>
-                {m.mime.startsWith("image/") && thumbs[m.id] ? (
-                  <img src={thumbs[m.id]} loading="lazy" alt={m.name} />
+                {thumbs[m.id] ? (
+                  <div className="media-thumb">
+                    <img src={thumbs[m.id]} loading="lazy" alt={m.name} />
+                    {m.mime.startsWith("video/") && <span className="media-play">▶</span>}
+                  </div>
                 ) : (
                   <div className="media-ph">
                     <span className="media-glyph">
@@ -203,10 +229,19 @@ export default function Gallery() {
             <div className="lightbox-img">
               {lightbox.mime.startsWith("image/") ? (
                 <img src={fullSrc ?? thumbs[lightbox.id] ?? ""} alt={lightbox.name} className="full-thumb" />
+              ) : videoSrc ? (
+                <video src={videoSrc} controls autoPlay playsInline className="video-full" />
+              ) : videoLoading ? (
+                <div className="empty">
+                  <div className="empty-icon">⏳</div>
+                  <p className="muted">
+                    Downloading video to play ({fmtSize(lightbox.size)})…
+                  </p>
+                </div>
               ) : (
                 <div className="empty">
                   <div className="empty-icon">▶</div>
-                  <p className="muted">Video — save to laptop to play</p>
+                  <p className="muted">Could not load this video — try saving it instead.</p>
                 </div>
               )}
             </div>

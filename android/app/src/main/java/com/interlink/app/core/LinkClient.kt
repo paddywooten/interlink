@@ -134,45 +134,46 @@ class LinkClient(
                 delay(2000)
                 continue
             }
-            var host = cfg.host
-            if (host == null) {
-                setState(LinkState.DISCONNECTED, "no endpoint")
+            // Candidate endpoints, most-preferred first:
+            //  1. 127.0.0.1 — the laptop's `adb reverse` tunnel (USB mode).
+            //     Connection is refused instantly when no tunnel exists, so
+            //     this costs nothing in WiFi mode and makes USB "just work".
+            //  2. The last known / UDP-discovered LAN address (WiFi mode).
+            val candidates = linkedSetOf("127.0.0.1")
+            cfg.host?.let { candidates += it }
+
+            var connected = false
+            for (host in candidates) {
+                if (!scope.isActive) return
+                try {
+                    setState(LinkState.CONNECTING, "$host:${cfg.port}")
+                    connectSession(host, cfg.port, cfg)
+                    attempt = 0
+                    connected = true
+                    break
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // A real stop() cancellation ends the loop. But withTimeout()
+                    // throws TimeoutCancellationException (a CancellationException)
+                    // on expiry — that must NOT kill the retry loop.
+                    if (e !is kotlinx.coroutines.TimeoutCancellationException || !scope.isActive) throw e
+                    Log.w(tag, "handshake timed out at $host")
+                    setState(LinkState.DISCONNECTED, "handshake timeout")
+                } catch (e: Exception) {
+                    Log.w(tag, "connect to $host failed: ${e.javaClass.simpleName}: ${e.message}")
+                    setState(LinkState.DISCONNECTED, e.message ?: e.javaClass.simpleName)
+                }
+            }
+            if (connected) continue
+            attempt++
+            if (attempt >= 3 || cfg.host == null) {
+                // Endpoint likely stale (DHCP renewal) → UDP whois.
                 discover(cfg.port)?.let { (h, p) ->
+                    Log.i(tag, "discovered laptop at $h:$p")
                     prefs.updateEndpoint(h, p)
-                    host = h
-                }
-                if (host == null) {
-                    delay(3000)
-                    continue
+                    attempt = 0
                 }
             }
-            try {
-                setState(LinkState.CONNECTING, "$host:${cfg.port}")
-                connectSession(host!!, cfg.port, cfg)
-                attempt = 0
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                // A real stop() cancellation ends the loop. But withTimeout()
-                // throws TimeoutCancellationException (a CancellationException)
-                // on expiry — that must NOT kill the retry loop.
-                if (e !is kotlinx.coroutines.TimeoutCancellationException || !scope.isActive) throw e
-                Log.w(tag, "handshake timed out")
-                setState(LinkState.DISCONNECTED, "handshake timeout")
-                attempt++
-                delay(backoff(attempt))
-            } catch (e: Exception) {
-                Log.w(tag, "connect failed: ${e.javaClass.simpleName}: ${e.message}")
-                setState(LinkState.DISCONNECTED, e.message ?: e.javaClass.simpleName)
-                attempt++
-                if (attempt >= 3) {
-                    // Endpoint likely stale (DHCP renewal) → UDP whois.
-                    discover(cfg.port)?.let { (h, p) ->
-                        Log.i(tag, "discovered laptop at $h:$p")
-                        prefs.updateEndpoint(h, p)
-                        attempt = 0
-                    }
-                }
-                delay(backoff(attempt))
-            }
+            delay(backoff(attempt))
         }
     }
 

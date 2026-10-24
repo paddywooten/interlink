@@ -31,6 +31,14 @@ export interface Status {
   port: number;
   deviceName: string;
   micDevice: string | null;
+  /** Laptop output device for the far end of a call (null = system default). */
+  speakerDevice?: string | null;
+  /** "auto" | "wifi" | "usb" — the requested connection mode. */
+  connection?: string;
+  /** How the phone is actually reaching us right now. */
+  transport?: "usb" | "wifi" | null;
+  /** Serial of the device adb currently sees over USB, if any. */
+  adbDevice?: string | null;
   clipboardEnabled: boolean;
   autoAcceptFiles: boolean;
   downloadDir: string | null;

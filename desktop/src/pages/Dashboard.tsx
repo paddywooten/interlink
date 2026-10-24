@@ -79,6 +79,22 @@ export default function Dashboard() {
                     </span>
                   </div>
                   <div className="stat">
+                    <span className="stat-k">Connection</span>
+                    <span className="stat-v">
+                      {connected
+                        ? status.transport === "usb"
+                          ? "USB cable"
+                          : status.transport === "wifi"
+                            ? "WiFi"
+                            : "Connected"
+                        : status.connection === "usb"
+                          ? "USB (no cable)"
+                          : status.connection === "wifi"
+                            ? "WiFi (waiting)"
+                            : "—"}
+                    </span>
+                  </div>
+                  <div className="stat">
                     <span className="stat-k">Laptop</span>
                     <span className="stat-v">{status.ip ?? "?"}:{status.port}</span>
                   </div>

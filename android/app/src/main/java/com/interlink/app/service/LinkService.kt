@@ -23,6 +23,8 @@ import com.interlink.app.core.Prefs
 import com.interlink.app.core.int
 import com.interlink.app.core.objOf
 import com.interlink.app.core.str
+import com.interlink.app.handlers.AppHandler
+import com.interlink.app.handlers.BackupHandler
 import com.interlink.app.handlers.CallHandler
 import com.interlink.app.handlers.ContactsHandler
 import com.interlink.app.handlers.DeviceHandler
@@ -32,9 +34,13 @@ import com.interlink.app.notif.LinkNotificationListener
 import com.interlink.app.notif.notifHistoryResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 
 /**
@@ -73,6 +79,7 @@ class LinkService : Service() {
     private lateinit var prefs: Prefs
     private lateinit var client: LinkClient
     private lateinit var callHandler: CallHandler
+    private var batteryJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -143,6 +150,26 @@ class LinkService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
             )
         }
+        if (s == LinkState.CONNECTED) startBatteryTicker() else stopBatteryTicker()
+    }
+
+    /**
+     * Battery percentage for the laptop's dashboard/sidebar: pushed once on
+     * connect and then every 30 s so the value never sits stale at "—".
+     */
+    private fun startBatteryTicker() {
+        if (batteryJob?.isActive == true) return
+        batteryJob = scope.launch {
+            while (isActive) {
+                runCatching { Bus.push("device.battery", DeviceHandler.battery(this@LinkService)) }
+                delay(30_000)
+            }
+        }
+    }
+
+    private fun stopBatteryTicker() {
+        batteryJob?.cancel()
+        batteryJob = null
     }
 
     // ——— request routing ———
@@ -174,7 +201,9 @@ class LinkService : Service() {
 
                 "contacts.query" -> {
                     val q = env.d.str("q")
-                    val limit = (env.d.int("limit") ?: 50).coerceIn(1, 50)
+                    // 5000 lets the laptop browse the whole address book; the
+                    // dialer/new-message pickers still pass small limits.
+                    val limit = (env.d.int("limit") ?: 50).coerceIn(1, 5000)
                     respond(session, env, ContactsHandler.search(this, q, limit))
                 }
 
@@ -185,6 +214,16 @@ class LinkService : Service() {
                 "media.get" -> MediaHandler.get(this, session, env)
 
                 "file.offer" -> respond(session, env, MediaHandler.receiveOffer(this, client, env.d))
+
+                // Remote app install: the laptop already streamed the .apk in
+                // via file.offer; we now hand it to the system installer
+                // (PackageInstaller session → user confirmation on the phone).
+                "app.install" -> respond(session, env, AppHandler.install(this, env.d))
+
+                // Backup / restore (PROTOCOL.md §4.11). Photos travel as
+                // ordinary files; these two carry contacts + SMS.
+                "backup.export" -> respond(session, env, BackupHandler.export(this, env.d))
+                "backup.import" -> respond(session, env, BackupHandler.import(this, env.d))
 
                 "call.dial" -> respond(session, env, callHandler.dial(env.d))
                 "call.answer" -> respond(session, env, callHandler.answer(env.d))

@@ -39,6 +39,16 @@ pub struct Config {
     pub phone_hint: Option<String>,
     #[serde(default)]
     pub mic_device: Option<String>,
+    /// Output device for the far end of a call relay (laptop speaker, a
+    /// Bluetooth speaker, …). None = system default.
+    #[serde(default)]
+    pub speaker_device: Option<String>,
+    /// How the phone is expected to reach this laptop:
+    ///   "auto" — USB (adb reverse) when a device is plugged in, else WiFi
+    ///   "usb"  — force the adb reverse tunnel
+    ///   "wifi" — force the LAN (never set up a reverse tunnel)
+    #[serde(default = "default_connection")]
+    pub connection: String,
     #[serde(default = "default_true")]
     pub clipboard_enabled: bool,
     #[serde(default = "default_true")]
@@ -51,6 +61,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_connection() -> String {
+    "auto".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -59,9 +73,22 @@ impl Default for Config {
             device_name: default_device_name(),
             phone_hint: None,
             mic_device: None,
+            speaker_device: None,
+            connection: default_connection(),
             clipboard_enabled: true,
             auto_accept_files: true,
             download_dir: None,
+        }
+    }
+}
+
+impl Config {
+    /// Normalized connection mode ("auto" | "wifi" | "usb").
+    pub fn connection_mode(&self) -> &str {
+        match self.connection.as_str() {
+            "usb" => "usb",
+            "wifi" => "wifi",
+            _ => "auto",
         }
     }
 }
@@ -142,12 +169,25 @@ pub struct Inner {
     pub call_audio: Option<crate::audio::CallAudioHandle>,
     /// Devices seen on the LAN via beacons, keyed by ip:port.
     pub devices: HashMap<String, crate::state::SeenDevice>,
+    /// Serial of the USB device adb currently sees (None = no cable /
+    /// no debugging). Refreshed by the connection ticker.
+    pub adb_device: Option<String>,
+    /// In-flight "wait for a push" reservations keyed like
+    /// `filedone:<tid-b64u>` or `backupresult:<tid-b64u>`.
+    pub waiters: HashMap<String, oneshot::Sender<Value>>,
 }
 
 pub struct AppState {
     pub inner: Mutex<Inner>,
     /// Broadcast channel for events destined to the webview.
     pub events: tokio::sync::broadcast::Sender<Value>,
+    /// Serializes call-audio start/stop.
+    ///
+    /// Two quick changes on the Calls page would otherwise race: both would
+    /// find `call_audio` empty (so neither stops the other), both start a
+    /// relay, and the loser's handle would be overwritten — leaving its
+    /// microphone stream open with nothing draining it.
+    pub call_audio_gate: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -155,6 +195,7 @@ impl AppState {
         let cfg = load_config(&cfg_path);
         let (events, _) = tokio::sync::broadcast::channel(256);
         Arc::new(AppState {
+            call_audio_gate: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 cfg,
                 cfg_path,
@@ -165,6 +206,8 @@ impl AppState {
                 server_running: false,
                 call_audio: None,
                 devices: HashMap::new(),
+                adb_device: None,
+                waiters: HashMap::new(),
             }),
             events,
         })
@@ -293,8 +336,41 @@ impl AppState {
         }
         inner.data_collectors.clear();
         inner.outgoing.clear();
+        // Waiters are per-transfer; drop them so callers see a closed channel
+        // instead of hanging until their own timeout.
+        inner.waiters.clear();
         inner.conn.take().map(|c| c.peer)
     }
+
+    /// Reserve a slot for a push identified by `key` (see `waiter_key`).
+    pub async fn add_waiter(&self, key: String) -> oneshot::Receiver<Value> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().await.waiters.insert(key, tx);
+        rx
+    }
+
+    /// Deliver a push payload to whoever is waiting on `key`.
+    pub async fn resolve_waiter(&self, key: &str, payload: Value) {
+        if let Some(tx) = self.inner.lock().await.waiters.remove(key) {
+            let _ = tx.send(payload);
+        }
+    }
+}
+
+/// Transport implied by the peer's address: a loopback peer can only have
+/// arrived through the laptop's own `adb reverse` tunnel, i.e. over USB.
+pub fn transport_of(ip: &str) -> &'static str {
+    let ip = ip.trim().trim_start_matches("::ffff:");
+    if ip == "::1" || ip.starts_with("127.") {
+        "usb"
+    } else {
+        "wifi"
+    }
+}
+
+/// Canonical waiter key for a push that carries a `tid`.
+pub fn waiter_key(kind: &str, tid: &str) -> String {
+    format!("{kind}:{tid}")
 }
 
 fn load_config(path: &PathBuf) -> Config {
@@ -342,3 +418,82 @@ pub fn local_ip() -> Option<String> {
 }
 
 pub type SharedState = Arc<AppState>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A peer on loopback can only have arrived through our own adb reverse
+    /// tunnel — that fact IS the USB/WiFi indicator, no wire message needed.
+    #[test]
+    fn transport_is_loopback_vs_lan() {
+        assert_eq!(transport_of("127.0.0.1"), "usb");
+        assert_eq!(transport_of("127.0.0.53"), "usb");
+        assert_eq!(transport_of("::1"), "usb");
+        // Dual-stack listeners hand us IPv4 addresses IPv6-mapped.
+        assert_eq!(transport_of("::ffff:127.0.0.1"), "usb");
+        assert_eq!(transport_of("172.20.10.3"), "wifi");
+        assert_eq!(transport_of("::ffff:172.20.10.3"), "wifi");
+    }
+
+    #[test]
+    fn waiter_keys_are_kind_and_tid() {
+        assert_eq!(waiter_key("filedone", "abc"), "filedone:abc");
+        assert_eq!(waiter_key("backupresult", "x"), "backupresult:x");
+    }
+
+    /// Connection mode must tolerate whatever is on disk — anything that isn't
+    /// explicitly usb/wifi falls back to auto rather than disabling the tunnel.
+    #[test]
+    fn connection_mode_normalizes() {
+        for (raw, want) in [("auto", "auto"), ("usb", "usb"), ("wifi", "wifi"), ("", "auto")] {
+            let cfg = Config {
+                connection: raw.into(),
+                ..Config::default()
+            };
+            assert_eq!(cfg.connection_mode(), want, "raw {raw:?}");
+        }
+    }
+
+    /// Existing configs predate `connection` / `speaker_device`; loading one
+    /// must still work and default the new fields rather than fail to parse.
+    #[test]
+    fn config_without_new_fields_still_parses() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"secret_b64":"aGk","port":27341,"device_name":"Laptop"}"#,
+        )
+        .expect("old config must deserialize");
+        assert_eq!(cfg.connection_mode(), "auto");
+        assert_eq!(cfg.speaker_device, None);
+        assert!(cfg.clipboard_enabled);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_is_delivered_once_then_gone() {
+        let state = AppState::new(std::env::temp_dir().join("il-test-deliver.json"));
+        let rx = state.add_waiter(waiter_key("filedone", "t1")).await;
+        state
+            .resolve_waiter("filedone:t1", json!({ "ok": true }))
+            .await;
+        let v = rx.await.expect("waiter must deliver");
+        assert_eq!(v["ok"], json!(true));
+
+        // Second delivery finds nothing to wake — resolve is a no-op, not a panic.
+        state
+            .resolve_waiter("filedone:t1", json!({ "ok": false }))
+            .await;
+        assert!(state.inner.lock().await.waiters.is_empty());
+    }
+
+    /// Losing the link must fail waiters instead of parking their callers
+    /// until an arbitrary timeout — a dropped sender closes the channel.
+    #[tokio::test]
+    async fn losing_the_connection_closes_pending_waiters() {
+        let state = AppState::new(std::env::temp_dir().join("il-test-clear.json"));
+        let rx = state.add_waiter(waiter_key("filedone", "t2")).await;
+        state.clear_connection().await;
+        assert!(rx.await.is_err(), "closed channel, not a hung await");
+        assert!(state.inner.lock().await.waiters.is_empty());
+    }
+}

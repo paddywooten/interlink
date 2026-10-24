@@ -458,6 +458,7 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
         // {name, path} shape the webview expects unless `transfer.done`
         // (which carries the name) already reported it.
         "file.done" => {
+            wake_file_waiter(state, &env.d, true).await;
             let path = env.d["path"].as_str().unwrap_or("").to_string();
             let d = match finish_outgoing(state, &env.d).await {
                 Some((_, true)) => return, // already reported
@@ -470,12 +471,14 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
         // The phone pushes `transfer.done`/`transfer.failed` (with name) and
         // the canonical `file.done` for the same tid — report each once.
         "transfer.done" | "transfer.failed" => {
+            wake_file_waiter(state, &env.d, env.t == "transfer.done").await;
             if let Some((_, true)) = finish_outgoing(state, &env.d).await {
                 return; // companion push already reported it
             }
             (env.t.as_str(), env.d)
         }
         "transfer.cancel" => {
+            wake_file_waiter(state, &env.d, false).await;
             let reason = env.d["reason"].as_str().unwrap_or("cancelled").to_string();
             let name = match finish_outgoing(state, &env.d).await {
                 Some((_, true)) => return,
@@ -491,7 +494,25 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
         "audio_state" => ("call.audio_state", env.d),
         other => (other, env.d),
     };
+    // A command may be parked on this exact push (e.g. `backup_restore`
+    // waiting for `backup.result`) — hand it the payload and move on.
+    if t == "backup.result" {
+        if let Some(tid) = d.get("tid").and_then(|v| v.as_str()) {
+            state
+                .resolve_waiter(&crate::state::waiter_key("backupresult", tid), d.clone())
+                .await;
+        }
+    }
     state.emit("push", json!({ "t": t, "d": d }));
+}
+
+/// Wake a `file_send` caller parked on this transfer's completion push.
+async fn wake_file_waiter(state: &SharedState, d: &Value, ok: bool) {
+    if let Some(tid) = d["tid"].as_str() {
+        state
+            .resolve_waiter(&crate::state::waiter_key("filedone", tid), json!({ "ok": ok }))
+            .await;
+    }
 }
 
 /// Mark a laptop-initiated transfer finished. Returns the tracked name and
@@ -566,7 +587,9 @@ async fn handle_inbound_file_offer(state: &SharedState, _app: &tauri::AppHandle,
     });
 }
 
-/// Collect chunks for an incoming transfer and write to disk.
+/// Collect chunks for an incoming transfer and write to disk. Returns the
+/// path the file landed on (callers like `media_download` hand it to the UI
+/// so the webview can play a just-downloaded video through the asset URL).
 pub async fn assemble_incoming(
     state: &SharedState,
     tid: [u8; 16],
@@ -575,12 +598,15 @@ pub async fn assemble_incoming(
     _mime: String,
     download_dir: Option<String>,
     rx: &mut mpsc::Receiver<(u32, Vec<u8>)>,
-) {
+) -> std::path::PathBuf {
     let base = download_dir
         .map(std::path::PathBuf::from)
         .unwrap_or_else(default_download_dir);
     let _ = tokio::fs::create_dir_all(&base).await;
     let dest = unique_path(&base, &name);
+    // Progress is keyed by the same b64u tid the sender used, so a caller that
+    // issued the transfer can correlate the stream.
+    let tid_label = b64u(&tid);
 
     let mut file = match tokio::fs::File::create(&dest).await {
         Ok(f) => f,
@@ -588,7 +614,7 @@ pub async fn assemble_incoming(
             state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": e.to_string() } }));
             // drain until done so the sender can finish
             while rx.recv().await.is_some() {}
-            return;
+            return dest;
         }
     };
 
@@ -596,7 +622,17 @@ pub async fn assemble_incoming(
     let mut received: u64 = 0;
     let mut next_seq: u32 = 0;
     let mut completed = false;
-    while let Some((seq, chunk)) = rx.recv().await {
+    loop {
+        // A stalled sender must not hang the collector forever (a big video
+        // that dies mid-stream otherwise wedges the request for good).
+        let item = match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
+            Ok(item) => item,
+            Err(_) => {
+                state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": "timed out waiting for data" } }));
+                break;
+            }
+        };
+        let Some((seq, chunk)) = item else { break };
         if seq != next_seq {
             state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": "sequence gap" } }));
             break;
@@ -608,7 +644,7 @@ pub async fn assemble_incoming(
             break;
         }
         if size > 0 && received % (1024 * 1024) < 65536 {
-            state.emit("progress", json!({ "tid": hex_tid(&tid), "received": received, "total": size }));
+            state.emit("progress", json!({ "tid": tid_label, "received": received, "total": size }));
         }
         if size > 0 && received >= size {
             completed = true;
@@ -618,12 +654,13 @@ pub async fn assemble_incoming(
     let _ = file.flush().await;
 
     if completed || (size == 0 && received > 0) {
-        state.emit("progress", json!({ "tid": hex_tid(&tid), "received": received, "total": size.max(received) }));
+        state.emit("progress", json!({ "tid": tid_label, "received": received, "total": size.max(received) }));
         state.emit(
             "push",
             json!({ "t": "transfer.done", "d": { "name": name, "path": dest.display().to_string(), "size": received } }),
         );
     }
+    dest
 }
 
 pub fn default_download_dir() -> std::path::PathBuf {
@@ -651,10 +688,6 @@ pub fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
         }
     }
     p
-}
-
-pub fn hex_tid(tid: &[u8; 16]) -> String {
-    tid.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Base64url helper shared with commands.

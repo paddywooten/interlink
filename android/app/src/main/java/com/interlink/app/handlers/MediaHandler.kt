@@ -77,11 +77,43 @@ object MediaHandler {
         }
         val page = merged.drop(offset).take(limit)
         return buildJsonObject {
-            // total is a lower bound (page + offset); laptop only checks it to
-            // know whether further pages may exist.
-            put("total", page.size + offset)
+            // Real totals (cheap _ID scan, cached ~15 s) — the laptop drives
+            // infinite scroll off `offset < total`, so a lower bound here would
+            // silently stop the gallery after the first page.
+            put("total", countFor(context, type))
             put("items", buildJsonArray { page.forEach { add(it) } })
         }
+    }
+
+    // ——— item counts (for pagination) ———
+
+    private val countCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Long>>()
+
+    /** Row count of one collection, cached for 15 s (key → count, millis). */
+    private fun countOf(context: Context, base: Uri, key: String): Long {
+        val now = System.currentTimeMillis()
+        countCache[key]?.let { (n, at) -> if (now - at < 15_000) return n }
+        var n = 0L
+        try {
+            // _ID-only projection: a full-cursor count without pulling metadata.
+            context.contentResolver.query(base, arrayOf(MediaStore.MediaColumns._ID), null, null, null)
+                ?.use { c -> n = c.count.toLong() }
+        } catch (e: SecurityException) {
+            throw Exception("perm: media permission not granted")
+        }
+        countCache[key] = n to now
+        return n
+    }
+
+    private fun countFor(context: Context, type: String): Long {
+        var total = 0L
+        if (type == "all" || type == "image") {
+            total += countOf(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "i")
+        }
+        if (type == "all" || type == "video") {
+            total += countOf(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "v")
+        }
+        return total
     }
 
     private fun queryCollection(
@@ -312,13 +344,16 @@ object MediaHandler {
         val name = d.str("name") ?: "transfer.bin"
         val mime = d.str("mime") ?: "application/octet-stream"
         val size = d.long("size") ?: 0L
+        // dest: "download" (default, Downloads/InterLink) or "media" (restore
+        // straight into the phone's photo/video library).
+        val dest = d.str("dest") ?: "download"
         val key = tidKey(tidB64)
 
         // Register BEFORE responding — LinkService sends the response after we
         // return, and the desktop begins streaming the moment it receives it.
         val ch = client.collectorFor(key, capacity = 64)
 
-        launchAssembler(context, client, key, tidB64, name, mime, size, ch)
+        launchAssembler(context, client, key, tidB64, name, mime, size, dest, ch)
         return objOf("tid" to tidB64, "status" to "accepted")
     }
 
@@ -330,13 +365,14 @@ object MediaHandler {
         name: String,
         mime: String,
         size: Long,
+        dest: String,
         ch: kotlinx.coroutines.channels.Channel<Pair<Int, ByteArray>>,
     ) {
         assemblerScope.launch(Dispatchers.IO) {
             var received = 0L
             var nextSeq = 0
             try {
-                val (out, displayPath) = openOutput(context, name, mime)
+                val (out, displayPath) = openOutput(context, name, mime, dest)
                 try {
                     while (true) {
                         val (seq, chunk) = try {
@@ -379,43 +415,69 @@ object MediaHandler {
     }
 
     /** Writes into Downloads/InterLink — MediaStore on Q+, File API below. */
-    private fun openOutput(context: Context, name: String, mime: String): Pair<OutputStream, String> {
+    private fun openOutput(context: Context, name: String, mime: String, dest: String = "download"): Pair<OutputStream, String> {
         val safeName = name.substringAfterLast('/').ifBlank { "transfer.bin" }
-        return if (Build.VERSION.SDK_INT >= 29) {
-            val values = android.content.ContentValues().apply {
-                // MediaStore auto-uniquifies DISPLAY_NAME collisions on Q+.
-                put(MediaStore.Downloads.DISPLAY_NAME, safeName)
-                put(MediaStore.Downloads.MIME_TYPE, mime)
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/InterLink")
-                put(MediaStore.Downloads.IS_PENDING, 1)
-            }
-            val uri = context.contentResolver.insert(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
-            ) ?: throw Exception("internal: MediaStore insert failed")
+        if (Build.VERSION.SDK_INT >= 29) {
+            // Restored media lands in the phone's library (Pictures/Movies),
+            // everything else in Downloads/InterLink.
+            val isMedia = dest == "media" && (mime.startsWith("image/") || mime.startsWith("video/"))
+            val uri = if (isMedia) {
+                val base = if (mime.startsWith("video/")) {
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+                context.contentResolver.insert(base, android.content.ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mime)
+                    if (android.os.Build.VERSION.SDK_INT >= 29) {
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                })
+            } else {
+                context.contentResolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    android.content.ContentValues().apply {
+                        // MediaStore auto-uniquifies DISPLAY_NAME collisions on Q+.
+                        put(MediaStore.Downloads.DISPLAY_NAME, safeName)
+                        put(MediaStore.Downloads.MIME_TYPE, mime)
+                        put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/InterLink")
+                        put(MediaStore.Downloads.IS_PENDING, 1)
+                    },
+                )
+            } ?: throw Exception("internal: MediaStore insert failed")
             val out = context.contentResolver.openOutputStream(uri)
                 ?: throw Exception("internal: cannot open output")
-            // Clear IS_PENDING on close via a wrapper.
-            val pending = object : OutputStream() {
-                override fun write(b: Int) = out.write(b)
-                override fun write(b: ByteArray) = out.write(b)
-                override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
-                override fun flush() = out.flush()
-                override fun close() {
-                    out.close()
-                    android.content.ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
-                        .let { context.contentResolver.update(uri, it, null, null) }
-                }
+            val display = if (isMedia) {
+                if (mime.startsWith("video/")) "${Environment.DIRECTORY_MOVIES}/$safeName"
+                else "${Environment.DIRECTORY_PICTURES}/$safeName"
+            } else {
+                "${Environment.DIRECTORY_DOWNLOADS}/InterLink/$safeName"
             }
-            pending to "${Environment.DIRECTORY_DOWNLOADS}/InterLink/$safeName"
-        } else {
-            @Suppress("DEPRECATION")
-            val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "InterLink",
-            )
-            dir.mkdirs()
-            val dest = uniqueFile(dir, safeName)
-            FileOutputStream(dest) to dest.absolutePath
+            return pendingStream(context, uri, out) to display
+        }
+        @Suppress("DEPRECATION")
+        val root = if (dest == "media") Environment.getExternalStoragePublicDirectory(
+            if (mime.startsWith("video/")) Environment.DIRECTORY_MOVIES else Environment.DIRECTORY_PICTURES,
+        ) else Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        @Suppress("DEPRECATION")
+        val dir = if (dest == "media") root else File(root, "InterLink")
+        dir.mkdirs()
+        val destFile = uniqueFile(dir, safeName)
+        return FileOutputStream(destFile) to destFile.absolutePath
+    }
+
+    /** Clear IS_PENDING when the stream closes so the entry becomes visible. */
+    private fun pendingStream(context: Context, uri: Uri, out: OutputStream): OutputStream = object : OutputStream() {
+        override fun write(b: Int) = out.write(b)
+        override fun write(b: ByteArray) = out.write(b)
+        override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+        override fun flush() = out.flush()
+        override fun close() {
+            out.close()
+            android.content.ContentValues().apply {
+                if (Build.VERSION.SDK_INT >= 29) put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }.let { context.contentResolver.update(uri, it, null, null) }
         }
     }
 

@@ -207,7 +207,8 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
         RuntimeRow(context, tick, multiLauncher, "SMS",
             arrayOf(Manifest.permission.READ_SMS, Manifest.permission.RECEIVE_SMS, Manifest.permission.SEND_SMS))
         RuntimeRow(context, tick, multiLauncher, "Contacts",
-            arrayOf(Manifest.permission.READ_CONTACTS))
+            arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS))
+        InstallAppsRow(context, tick)
         RuntimeRow(context, tick, multiLauncher, "Phone / calls",
             arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS))
         RuntimeRow(context, tick, multiLauncher, "Microphone (call audio)",
@@ -241,6 +242,32 @@ private fun RuntimeRow(
         actionLabel = if (ok) "Granted" else "Request",
         enabled = !ok,
         onAction = { launcher.launch(perms) },
+    )
+}
+
+/**
+ * "Install unknown apps" is a per-app special access, not a runtime
+ * permission — [PackageManager.canRequestPackageInstalls] gates whether the
+ * system will show an install prompt for a laptop-delivered .apk.
+ */
+@Composable
+private fun InstallAppsRow(context: Context, tick: Int) {
+    val ok = remember(tick) { context.packageManager.canRequestPackageInstalls() }
+    PermissionRow(
+        label = "Install unknown apps (remote APK install)",
+        ok = ok,
+        actionLabel = if (ok) "Granted" else "Grant",
+        enabled = !ok,
+        onAction = {
+            runCatching {
+                context.startActivity(
+                    android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:${context.packageName}"),
+                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+        },
     )
 }
 

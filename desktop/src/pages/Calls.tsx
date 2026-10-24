@@ -3,6 +3,9 @@ import * as api from "../api";
 import type { Contact } from "../types";
 import { setState, toast, useStore } from "../store";
 
+/** Select value meaning "leave this direction on the phone". */
+const PHONE = "__phone__";
+
 function fmtDur(sec: number) {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
@@ -11,6 +14,7 @@ function fmtDur(sec: number) {
 
 export default function Calls() {
   const connected = useStore((s) => s.connected);
+  const status = useStore((s) => s.status);
   const call = useStore((s) => s.call);
   const muted = useStore((s) => s.callMuted);
   const audioBroken = useStore((s) => s.audioBroken);
@@ -20,12 +24,30 @@ export default function Calls() {
   const [dialing, setDialing] = useState(false);
   const [audioOn, setAudioOn] = useState(false);
   const [mics, setMics] = useState<{ name: string; default: boolean }[]>([]);
-  const [mic, setMic] = useState<string | null>(null);
+  const [spks, setSpks] = useState<{ name: string; default: boolean }[]>([]);
+  const [micSel, setMicSel] = useState<string>(PHONE);
+  const [spkSel, setSpkSel] = useState<string>(PHONE);
   const [elapsed, setElapsed] = useState(0);
+
+  // The two directions are independent: `uplink` = speak through the laptop,
+  // `downlink` = hear through the laptop. Both false means the call stays
+  // entirely on the phone and we don't start a relay at all.
+  const uplink = micSel !== PHONE;
+  const downlink = spkSel !== PHONE;
 
   useEffect(() => {
     api.listAudioInputs().then((r) => setMics(r.devices)).catch(() => undefined);
+    api.listAudioOutputs().then((r) => setSpks(r.devices)).catch(() => undefined);
   }, []);
+
+  // Seed both pickers from the saved config so a call starts the way the
+  // user left it (null = "this phone").
+  useEffect(() => {
+    if (!status) return;
+    setMicSel(status.micDevice ?? PHONE);
+    setSpkSel(status.speakerDevice ?? PHONE);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.micDevice, status?.speakerDevice]);
 
   // Call duration ticker
   useEffect(() => {
@@ -38,13 +60,26 @@ export default function Calls() {
     return () => clearInterval(iv);
   }, [call?.callId, call?.state]);
 
-  // When a call goes active (outgoing or answered), auto-start audio relay.
+  // Keep the relay in step with the call and the two direction flags. This
+  // effect owns the whole lifecycle, so changing a select just re-runs it —
+  // no separate "restart" path to keep correct.
   useEffect(() => {
     let cancelled = false;
-    const maybeStart = async () => {
-      if (!call || call.state !== "active" || audioOn || !connected) return;
+    const run = async () => {
+      if (!call || call.state !== "active" || !connected) return;
+      if (!uplink && !downlink) {
+        // Phone handles both directions itself; make sure nothing is relaying.
+        setAudioOn(false);
+        api.callAudioStop(call.callId).catch(() => undefined);
+        return;
+      }
       try {
-        await api.callAudioStart(call.callId, mic ?? undefined);
+        await api.callAudioStart(call.callId, {
+          mic: uplink && micSel !== "" ? micSel : undefined,
+          speaker: downlink && spkSel !== "" ? spkSel : undefined,
+          uplink,
+          downlink,
+        });
         if (!cancelled) {
           setAudioOn(true);
           setState({ audioBroken: null });
@@ -56,19 +91,19 @@ export default function Calls() {
         }
       }
     };
-    maybeStart();
+    run();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [call?.callId, call?.state, connected]);
+  }, [call?.callId, call?.state, connected, uplink, downlink, micSel, spkSel]);
 
   useEffect(() => {
-    if (call?.state === "ended" && audioOn) {
+    if (call?.state === "ended") {
       setAudioOn(false);
       api.callAudioStop(call.callId).catch(() => undefined);
     }
-  }, [call?.state, call?.callId, audioOn]);
+  }, [call?.state, call?.callId]);
 
   const search = async (v: string) => {
     setQ(v);
@@ -112,22 +147,18 @@ export default function Calls() {
     }
   };
 
-  const changeMic = async (name: string) => {
-    setMic(name);
-    await api.setSettings({ mic_device: name });
-    if (audioOn && call) {
-      // Restart relay with the new device
-      setAudioOn(false);
-      await api.callAudioStop(call.callId).catch(() => undefined);
-      try {
-        await api.callAudioStart(call.callId, name);
-        setAudioOn(true);
-        toast("Microphone switched", "success");
-      } catch (e) {
-        setState({ audioBroken: String(e) });
-        toast(String(e), "error");
-      }
+  /** Save both directions and re-key the relay (the effect above restarts it). */
+  const applyAudio = async (micNext: string, spkNext: string) => {
+    setMicSel(micNext);
+    setSpkSel(spkNext);
+    const mic = micNext === PHONE || micNext === "" ? null : micNext;
+    const speaker = spkNext === PHONE || spkNext === "" ? null : spkNext;
+    try {
+      await api.setSettings({ mic_device: mic, speaker_device: speaker });
+    } catch (e) {
+      toast(String(e), "error");
     }
+    if (call?.state === "active") setAudioOn(false);
   };
 
   const keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"];
@@ -188,9 +219,14 @@ export default function Calls() {
           {call.state === "active" && (
             <div className="call-audio">
               <div className="row gap">
-                <label className="muted">Mic:</label>
-                <select className="select" value={mic ?? ""} onChange={(e) => changeMic(e.target.value)}>
-                  <option value="">System default</option>
+                <label className="muted">Speak through:</label>
+                <select
+                  className="select"
+                  value={micSel}
+                  onChange={(e) => applyAudio(e.target.value, spkSel)}
+                >
+                  <option value={PHONE}>📱 This phone</option>
+                  <option value="">🎙 Laptop default mic</option>
                   {mics.map((m) => (
                     <option key={m.name} value={m.name}>
                       {m.name}
@@ -199,10 +235,41 @@ export default function Calls() {
                   ))}
                 </select>
               </div>
-              <div className={`audio-status ${audioOn && !audioBroken ? "ok" : "warn"}`}>
-                {audioOn && !audioBroken
-                  ? "🔊 Relaying audio — talk through your laptop"
-                  : `🔈 ${audioBroken ? "Relay unavailable (phone restricted audio) — call uses phone speaker" : "Connecting audio…"}`}
+              <div className="row gap">
+                <label className="muted">Hear through:</label>
+                <select
+                  className="select"
+                  value={spkSel}
+                  onChange={(e) => applyAudio(micSel, e.target.value)}
+                >
+                  <option value={PHONE}>📱 This phone</option>
+                  <option value="">🔊 Laptop default output</option>
+                  {spks.map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}
+                      {s.default ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div
+                className={`audio-status ${
+                  (audioOn && !audioBroken) || (!uplink && !downlink) ? "ok" : "warn"
+                }`}
+              >
+                {!uplink && !downlink
+                  ? "🔈 Call audio stays on the phone"
+                  : audioOn && !audioBroken
+                    ? uplink && downlink
+                      ? "🔊 Speaking and hearing through your laptop"
+                      : downlink
+                        ? "🔊 Hearing through your laptop — speaking into the phone"
+                        : "🔊 Speaking through your laptop — hearing on the phone"
+                    : `🔈 ${
+                        audioBroken
+                          ? "Relay unavailable (phone restricted audio) — call uses phone speaker"
+                          : "Connecting audio…"
+                      }`}
               </div>
             </div>
           )}
@@ -260,9 +327,11 @@ export default function Calls() {
             )}
           </div>
           <div className="muted" style={{ marginTop: 12 }}>
-            Calls are placed on your phone; audio streams to your laptop microphone &
-            speakers. If your phone restricts call audio capture, the call still works on
-            the phone speaker.
+            Calls are always placed on your phone. Use the two pickers above to decide whether
+            you speak and/or hear through this laptop (any mic or speaker it has, including
+            Bluetooth) — leaving both on "This phone" keeps the call entirely on the phone.
+            If the phone restricts call audio capture, that direction falls back to the phone
+            speaker.
           </div>
         </div>
       </div>

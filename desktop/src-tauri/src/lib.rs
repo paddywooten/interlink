@@ -1,7 +1,9 @@
 use tauri::{Emitter, Manager};
 
 mod audio;
+mod backup;
 mod commands;
+mod connection;
 mod crypto;
 mod protocol;
 mod server;
@@ -52,6 +54,11 @@ pub fn run() {
                 });
             }
 
+            // USB mode: keep the `adb reverse` tunnel reconciled with the
+            // configured connection preference (also picks up a phone that
+            // gets plugged in after launch).
+            connection::spawn(state.clone());
+
             app.manage(state);
             Ok(())
         })
@@ -67,11 +74,18 @@ pub fn run() {
             commands::mirror_start,
             commands::mirror_stop,
             commands::list_audio_inputs,
+            commands::list_audio_outputs,
             commands::call_audio_start,
             commands::call_audio_stop,
             commands::call_mute,
             commands::get_settings,
             commands::set_settings,
+            commands::connection_refresh,
+            commands::pick_apk,
+            commands::pick_backup_dir,
+            commands::backup_start,
+            commands::backup_restore,
+            commands::backup_list,
             commands::pick_directory,
             commands::pick_files,
             commands::reveal_in_folder,

@@ -7,6 +7,7 @@ import Dashboard from "./pages/Dashboard";
 import Messages from "./pages/Messages";
 import Notifications from "./pages/Notifications";
 import Gallery from "./pages/Gallery";
+import Contacts from "./pages/Contacts";
 import Calls from "./pages/Calls";
 import Mirror from "./pages/Mirror";
 import Settings from "./pages/Settings";
@@ -133,6 +134,21 @@ export default function App() {
           case "transfer.failed":
             toast(`${d.name ?? "transfer"} failed: ${d.error}`, "error");
             break;
+          case "install.status":
+            // Pushed by the phone as the PackageInstaller session progresses.
+            // The user taps confirm on the phone; this just keeps the laptop
+            // informed of what happened next.
+            if (d.status === "pending") {
+              toast(`Installing ${d.name ?? "app"} on phone… tap Install on the phone`, "info");
+            } else if (d.status === "success") {
+              toast(`${d.name ?? "App"} installed on phone`, "success");
+            } else {
+              toast(
+                `Install ${d.status ?? "failed"}: ${d.error ?? "see the phone for details"}`,
+                d.status === "failure" ? "error" : "info",
+              );
+            }
+            break;
           case "file.offer":
             toast(`Phone offered "${d.name}" — enable auto-accept in Settings`, "info");
             break;
@@ -176,6 +192,9 @@ export default function App() {
       break;
     case "gallery":
       pageEl = <Gallery />;
+      break;
+    case "contacts":
+      pageEl = <Contacts />;
       break;
     case "calls":
       pageEl = <Calls />;

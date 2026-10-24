@@ -12,11 +12,21 @@ Two components, one encrypted protocol:
 
 - 🔔 Notification mirroring with inline reply / dismiss
 - 💬 SMS threads — read & send texts from the laptop
-- 🖼️ Gallery browsing, photo download, file transfer both ways
-- 📞 Phone calls — dial pad, answer/decline, audio relay with selectable laptop microphone
+- 👥 Contacts — the whole address book on the laptop, searchable, tap to call
+- 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
+  thumbnails, and in-app video playback (download once, then play from disk)
+- 📞 Phone calls — dial pad, answer/decline, and per-call audio routing: speak
+  through any laptop mic (or the phone) and hear through any laptop output
+  (laptop speakers, a Bluetooth speaker, HDMI — or the phone)
 - 📱 Screen mirroring — live phone screen on the laptop (MediaProjection, user-approved)
 - 📋 Clipboard sharing (both directions)
-- 🔊 Ring my phone, battery status, device info
+- 🔌 USB or WiFi — plug the phone in and the link rides the cable through an
+  `adb reverse` tunnel; unplug and it falls back to WiFi. No shared network needed.
+- 📦 Remote app install — push an `.apk` from the laptop; the phone shows its
+  normal install confirmation and you tap Install on the phone
+- 💾 Backup & restore — contacts, SMS and every photo/video into a plain folder
+  you can open and read, and back onto any phone
+- 🔊 Ring my phone, live battery percentage, device info
 - 🌐 Nearby devices — see InterLink phones and laptops on the same Wi-Fi automatically
 
 ## How it works
@@ -24,6 +34,20 @@ Two components, one encrypted protocol:
 1. **Pair:** the laptop shows a QR code (LAN address + 32-byte secret); the phone scans it once.
 2. **Connect:** the phone (foreground service) keeps an encrypted WebSocket connection to the laptop over the local network. Traffic is end-to-end encrypted (XChaCha20-Poly1305, key derived from the pairing secret — see [PROTOCOL.md](PROTOCOL.md)).
 3. **Use:** open the laptop app — messages, notifications, gallery and calls are live.
+
+### USB or WiFi
+
+The phone always tries `127.0.0.1` first and only then the LAN, which makes the
+transport a laptop-side setting with no extra wire protocol at all:
+
+- **Auto** (default) — use the USB cable whenever the phone is plugged in with
+  USB debugging on, otherwise WiFi.
+- **USB** — cable only; surfaced as an error in the UI if no cable is present.
+- **WiFi** — LAN only; any existing tunnel is torn down.
+
+Setting it to USB means the link works with the two devices sharing no network
+at all — just the cable. The laptop shows which transport is actually in use
+(🔌 USB / 📶 WiFi) in the sidebar and on the dashboard.
 
 ## Repository layout
 

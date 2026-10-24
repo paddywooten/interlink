@@ -131,6 +131,35 @@ fn pick_input(want: Option<&str>) -> Result<Device, String> {
     host.default_input_device().ok_or_else(|| "internal: no microphone found".into())
 }
 
+/// Enumerate output devices (laptop speakers, Bluetooth speakers, HDMI, …).
+pub fn list_outputs() -> Vec<serde_json::Value> {
+    let host = cpal::default_host();
+    let default_name = host.default_output_device().and_then(|d| d.name().ok());
+    let mut out: Vec<serde_json::Value> = Vec::new();
+    if let Ok(devs) = host.output_devices() {
+        for d in devs {
+            let name = d.name().unwrap_or_else(|_| "unknown".into());
+            let is_default = default_name.as_deref() == Some(name.as_str());
+            if !out.iter().any(|v| v["name"] == name) {
+                out.push(json!({ "name": name, "default": is_default }));
+            }
+        }
+    }
+    out
+}
+
+fn pick_output(want: Option<&str>) -> Result<Device, String> {
+    let host = cpal::default_host();
+    if let Some(want) = want {
+        if let Ok(mut devs) = host.output_devices() {
+            if let Some(d) = devs.find(|d| d.name().map(|n| n == want).unwrap_or(false)) {
+                return Ok(d);
+            }
+        }
+    }
+    host.default_output_device().ok_or_else(|| "internal: no output device".into())
+}
+
 /// Uplink pipeline: runs inside the cpal input callback (non-async).
 /// Normalizes device format → f32 mono → 16 kHz → 20 ms frames → try_send.
 struct MicPipeline {
@@ -185,36 +214,40 @@ impl MicPipeline {
 }
 
 /// Start relaying call audio. `call_id` ties frames to the active call.
+///
+/// The two directions are independent so the user can e.g. hear the far end
+/// on a Bluetooth speaker while still speaking into the phone:
+///   `uplink`   — laptop mic → phone (speak through the laptop)
+///   `downlink` — phone → chosen laptop output (hear through the laptop)
 pub async fn start(
     state: SharedState,
     call_id: String,
     mic: Option<String>,
+    speaker: Option<String>,
+    uplink: bool,
+    downlink: bool,
 ) -> Result<CallAudioHandle, String> {
+    if !uplink && !downlink {
+        return Err("internal: nothing to relay (both directions off)".into());
+    }
     let tid = tid_from_str(&call_id);
     let muted = Arc::new(AtomicBool::new(false));
+    let ring = Arc::new(OutRing::new());
 
     // ——— Downlink registration: route call.audio data frames to our collector ———
-    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
-    {
-        let mut inner = state.inner.lock().await;
-        inner.data_collectors.remove(&tid);
-        inner.data_collectors.insert(tid, chunk_tx);
-    }
-
-    // Downlink worker thread: chunks → decode → resample → device-rate ring.
-    let ring = Arc::new(OutRing::new());
-    {
+    if downlink {
+        let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
+        {
+            let mut inner = state.inner.lock().await;
+            inner.data_collectors.remove(&tid);
+            inner.data_collectors.insert(tid, chunk_tx);
+        }
+        // Downlink worker thread: chunks → PCM f32 → device-rate ring. The
+        // output callback resamples on pull, so the ring stays at 16 kHz.
         let ring = ring.clone();
         std::thread::Builder::new()
             .name("il-downlink".into())
             .spawn(move || {
-                // out_rate learned from the first chunk? We fix rate = RATE here and
-                // resample to the device rate once known via channel metadata — but the
-                // audio thread owns that. Instead: downlink thread converts 16k PCM →
-                // f32 ONLY; resampling to device rate happens with a shared Resampler
-                // installed by the audio thread (fallback: identity 16k pass-through
-                // when device runs at 16k — rare). Simpler: ring stores 16k samples and
-                // the OUTPUT CALLBACK resamples. See OutRing note below.
                 while let Some((_seq, chunk)) = chunk_rx.blocking_recv() {
                     if chunk.len() < 2 {
                         continue;
@@ -229,33 +262,36 @@ pub async fn start(
             .map_err(|e| format!("internal: {e}"))?;
     }
 
-    // ——— Uplink pump: frames → seal with session key → send ———
-    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            while let Some((seq, pcm)) = frame_rx.recv().await {
-                if !state.send_data_frame(tid, seq, &pcm).await {
-                    break; // disconnected
+    // ——— Uplink pipeline: mic → frames → seal with session key → send ———
+    let pipeline: Option<Arc<MicPipeline>> = if uplink {
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
+        {
+            let state = state.clone();
+            tokio::spawn(async move {
+                while let Some((seq, pcm)) = frame_rx.recv().await {
+                    if !state.send_data_frame(tid, seq, &pcm).await {
+                        break; // disconnected
+                    }
                 }
-            }
-        });
-    }
-
-    let pipeline = Arc::new(MicPipeline {
-        tx: frame_tx,
-        // Placeholder until the audio thread learns the device rate (it
-        // rewrites this before any callback can run).
-        resampler: Mutex::new(Resampler::new(RATE, RATE)),
-        pending: Mutex::new(Vec::with_capacity(FRAME_SAMPLES * 4)),
-        seq: Mutex::new(0),
-        channels: std::sync::atomic::AtomicU32::new(1),
-        muted: muted.clone(),
-    });
+            });
+        }
+        Some(Arc::new(MicPipeline {
+            tx: frame_tx,
+            // Placeholder until the audio thread learns the device rate (it
+            // rewrites this before any callback can run).
+            resampler: Mutex::new(Resampler::new(RATE, RATE)),
+            pending: Mutex::new(Vec::with_capacity(FRAME_SAMPLES * 4)),
+            seq: Mutex::new(0),
+            channels: std::sync::atomic::AtomicU32::new(1),
+            muted: muted.clone(),
+        }))
+    } else {
+        None
+    };
 
     // ——— Audio thread: owns both cpal streams (they are !Send) ———
-    // Reports the negotiated mic rate once both streams are running.
-    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<u32, String>>(1);
+    // Reports readiness (or a failure reason) once the streams are running.
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
     let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
     let pipeline_thread = pipeline.clone();
@@ -263,68 +299,80 @@ pub async fn start(
     std::thread::Builder::new()
         .name("il-call-audio".into())
         .spawn(move || {
-            let in_device = match pick_input(mic.as_deref()) {
-                Ok(d) => d,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
+            // ——— Uplink: chosen input device → MicPipeline ———
+            let in_stream: Option<Stream> = match pipeline_thread.clone() {
+                Some(pipeline) => {
+                    let (device, cfg) = match pick_input(mic.as_deref()).and_then(|d| {
+                        let c = d.default_input_config().map_err(|e| format!("internal: {e}"))?;
+                        Ok((d, c))
+                    }) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            return;
+                        }
+                    };
+                    let channels = cfg.channels();
+                    let rate = cfg.sample_rate().0;
+                    let fmt = cfg.sample_format();
+                    let config = StreamConfig::from(cfg);
+                    match build_input_stream(&device, config, fmt, pipeline.clone()) {
+                        Ok(s) => {
+                            // Reconfigure the pipeline with the true mic rate.
+                            {
+                                let mut rs = pipeline.resampler.lock().unwrap();
+                                *rs = Resampler::new(rate, RATE);
+                            }
+                            pipeline.channels.store(channels as u32, Ordering::Relaxed);
+                            Some(s)
+                        }
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e));
+                            return;
+                        }
+                    }
                 }
-            };
-            let out_device = match cpal::default_host().default_output_device() {
-                Some(d) => d,
-                None => {
-                    let _ = ready_tx.send(Err("internal: no output device".into()));
-                    return;
-                }
-            };
-            let (in_cfg, out_cfg, out_format) = match (
-                in_device.default_input_config(),
-                out_device.default_output_config(),
-            ) {
-                (Ok(ic), Ok(oc)) => {
-                    let fmt = oc.sample_format();
-                    (StreamConfig::from(ic), StreamConfig::from(oc), fmt)
-                }
-                _ => {
-                    let _ = ready_tx.send(Err("internal: cannot query audio configs".into()));
-                    return;
-                }
-            };
-            let in_rate = in_cfg.sample_rate.0;
-            // Reconfigure the pipeline with the true mic rate.
-            {
-                let mut rs = pipeline_thread.resampler.lock().unwrap();
-                *rs = Resampler::new(in_rate, RATE);
-            }
-            pipeline_thread
-                .channels
-                .store(in_cfg.channels as u32, Ordering::Relaxed);
-
-            // The ring receives 16 kHz samples; the output callback resamples on pull.
-            let out_resampler = Arc::new(Mutex::new(Resampler::new(RATE, out_cfg.sample_rate.0)));
-
-            let in_stream = match build_input_stream(&in_device, in_cfg, pipeline_thread.clone()) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
-            };
-            let out_stream = match build_output_stream(
-                &out_device,
-                out_cfg,
-                out_format,
-                ring_thread,
-                out_resampler,
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                    return;
-                }
+                None => None,
             };
 
-            if ready_tx.send(Ok(in_rate)).is_err() {
+            // ——— Downlink: chosen output device ← ring ———
+            let out_stream: Option<Stream> = if downlink {
+                let out_device = match pick_output(speaker.as_deref()) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let cfg = match out_device.default_output_config() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(format!("internal: {e}")));
+                        return;
+                    }
+                };
+                let fmt = cfg.sample_format();
+                // The ring receives 16 kHz samples; the callback resamples on pull.
+                let out_resampler =
+                    Arc::new(Mutex::new(Resampler::new(RATE, cfg.sample_rate().0)));
+                match build_output_stream(
+                    &out_device,
+                    StreamConfig::from(cfg),
+                    fmt,
+                    ring_thread,
+                    out_resampler,
+                ) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+
+            if ready_tx.send(Ok(())).is_err() {
                 return;
             }
             // Stay alive until stopped.
@@ -340,7 +388,7 @@ pub async fn start(
         .map_err(|e| format!("internal: {e}"))?;
 
     // Wait for the audio thread without blocking the async runtime.
-    let started: Result<Result<u32, String>, String> = tokio::task::spawn_blocking(move || {
+    let started: Result<Result<(), String>, String> = tokio::task::spawn_blocking(move || {
         match ready_rx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(r) => r,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -354,8 +402,10 @@ pub async fn start(
     .await
     .map_err(|e| format!("internal: {e}"));
     match started {
-        Ok(Ok(mic_rate)) => {
-            log::info!("call audio relay active for call {call_id} (mic {mic_rate} Hz)");
+        Ok(Ok(())) => {
+            log::info!(
+                "call audio relay active for call {call_id} (uplink {uplink}, downlink {downlink})"
+            );
             Ok(CallAudioHandle { stop: stop_tx, muted, call_id })
         }
         // Failed or never reported in: drop the downlink collector so data
@@ -370,12 +420,9 @@ pub async fn start(
 fn build_input_stream(
     device: &Device,
     config: StreamConfig,
+    fmt: SampleFormat,
     sink: Arc<MicPipeline>,
 ) -> Result<Stream, String> {
-    let fmt = device
-        .default_input_config()
-        .map_err(|e| format!("internal: {e}"))?
-        .sample_format();
     let err_fn = |e| log::error!("mic stream error: {e}");
     let stream = match fmt {
         SampleFormat::F32 => {
@@ -486,18 +533,24 @@ pub async fn start_negotiated(
     state: &SharedState,
     call_id: &str,
     mic: Option<String>,
+    speaker: Option<String>,
+    uplink: bool,
+    downlink: bool,
 ) -> Result<CallAudioHandle, String> {
     let resp = state
         .request(
             "call.audio_start",
-            json!({ "callId": call_id, "codec": "pcm_s16le", "rate": RATE, "ch": 1, "frameMs": 20 }),
+            json!({
+                "callId": call_id, "codec": "pcm_s16le", "rate": RATE, "ch": 1, "frameMs": 20,
+                "uplink": uplink, "downlink": downlink,
+            }),
             std::time::Duration::from_secs(8),
         )
         .await?;
     if resp.ok == Some(false) {
         return Err(resp.e.unwrap_or_else(|| "internal: phone refused audio".into()));
     }
-    match start(state.clone(), call_id.to_string(), mic).await {
+    match start(state.clone(), call_id.to_string(), mic, speaker, uplink, downlink).await {
         Ok(h) => Ok(h),
         Err(e) => {
             state
