@@ -58,7 +58,9 @@ export interface NotifItem {
   category?: string;
   when: number;
   ongoing?: boolean;
-  actions?: { label: string; token: string }[];
+  /** `reply` marks the action that accepts RemoteInput (the one a typed
+   *  reply has to be sent back to). */
+  actions?: { label: string; token: string; reply?: boolean }[];
   hasReply?: boolean;
   avatar?: string | null;
   ts?: number; // local receive time

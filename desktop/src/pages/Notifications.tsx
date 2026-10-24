@@ -94,8 +94,13 @@ export default function Notifications() {
       )}
 
       <div className="notif-list">
-        {items.map((n) => (
-          <div key={n.key + (n.when ?? 0)} className={`notif ${n.ongoing ? "ongoing" : ""}`}>
+        {items.map((n) => {
+          // The typed reply has to be delivered to whichever action carries
+          // the RemoteInput — sending it against an arbitrary index (or none)
+          // leaves the phone with nothing to hand to WhatsApp.
+          const replyToken = (n.actions ?? []).find((a) => a.reply)?.token ?? "";
+          return (
+            <div key={n.key + (n.when ?? 0)} className={`notif ${n.ongoing ? "ongoing" : ""}`}>
             <div className="notif-avatar">{(n.app || "?").slice(0, 1).toUpperCase()}</div>
             <div className="notif-main">
               <div className="notif-top">
@@ -110,11 +115,16 @@ export default function Notifications() {
                     Reply
                   </button>
                 )}
-                {(n.actions ?? []).map((a) => (
-                  <button key={a.token} className="btn tiny ghost" onClick={() => act(n, a.token)}>
-                    {a.label}
-                  </button>
-                ))}
+                {(n.actions ?? [])
+                  // The typed Reply box below already covers the action that
+                  // accepts text; offering it again here would fire that
+                  // action with no text, which does nothing useful.
+                  .filter((a) => !a.reply)
+                  .map((a) => (
+                    <button key={a.token} className="btn tiny ghost" onClick={() => act(n, a.token)}>
+                      {a.label}
+                    </button>
+                  ))}
                 {!n.ongoing && (
                   <button className="btn tiny ghost" onClick={() => dismiss(n)}>
                     Dismiss
@@ -131,14 +141,14 @@ export default function Notifications() {
                     onChange={(e) => setReplyText(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && replyText.trim()) {
-                        act(n, "", replyText.trim());
+                        act(n, replyToken, replyText.trim());
                       }
                     }}
                   />
                   <button
                     className="btn primary tiny"
                     disabled={!replyText.trim()}
-                    onClick={() => act(n, "", replyText.trim())}
+                    onClick={() => act(n, replyToken, replyText.trim())}
                   >
                     Send
                   </button>
@@ -146,7 +156,8 @@ export default function Notifications() {
               )}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="page-foot">

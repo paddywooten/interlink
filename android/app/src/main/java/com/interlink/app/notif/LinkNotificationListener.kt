@@ -179,7 +179,17 @@ class LinkNotificationListener : NotificationListenerService() {
                 "hasReply" to hasReply,
                 "actions" to buildJsonArray {
                     n.actions?.forEachIndexed { i, a ->
-                        add(objOf("label" to (a.title?.toString() ?: ""), "token" to i.toString()))
+                        add(
+                            objOf(
+                                "label" to (a.title?.toString() ?: ""),
+                                "token" to i.toString(),
+                                // Which action carries the RemoteInput. The
+                                // laptop needs this: it renders a generic
+                                // Reply box but cannot tell which index to
+                                // send the text back to.
+                                "reply" to (a.remoteInputs?.isNotEmpty() == true),
+                            ),
+                        )
                     }
                 },
             ),
@@ -204,23 +214,55 @@ class LinkNotificationListener : NotificationListenerService() {
         Bus.push("notif.remove", objOf("key" to sbn.key, "pkg" to (sbn.packageName ?: "")))
     }
 
-    /** Laptop request: invoke action [token] (index), optionally with reply text. */
-    fun handleAction(key: String, token: String, reply: String?) {
-        val idx = token.toIntOrNull() ?: return
-        val target = activeNotifications?.firstOrNull { it.key == key } ?: return
-        val action = target.notification.actions?.getOrNull(idx) ?: return
+    /**
+     * Laptop request: invoke action [token], optionally carrying [reply] text
+     * for an action that takes RemoteInput (WhatsApp, SMS, …).
+     *
+     * Returns an error message, or null on success. The laptop toasts from
+     * this, so a dropped action has to say so — reporting success for
+     * something that never happened is worse than failing, because the user
+     * has no reason to look again.
+     *
+     * [token] is an action index, but a reply may legitimately arrive blank:
+     * the laptop renders a generic reply box and doesn't have to know the
+     * index, so a blank token falls back to the first action that accepts
+     * RemoteInput.
+     */
+    fun handleAction(key: String, token: String, reply: String?): String? {
+        val target = activeNotifications?.firstOrNull { it.key == key }
+            ?: return "that notification is no longer on the phone"
+        val actions = target.notification.actions.orEmpty()
+        if (actions.isEmpty()) return "that notification has no actions"
+
+        // WhatsApp, and most messaging apps, put Reply first and something
+        // harmless second — but the index is app-defined and may shift between
+        // updates of the same notification, so it is resolved rather than
+        // assumed (see resolveActionTarget).
+        val acceptsReply = actions.map { !it.remoteInputs.isNullOrEmpty() }
+        val idx = resolveActionTarget(token, reply, acceptsReply)
+            ?: return if (reply != null) {
+                "that notification offers no reply"
+            } else {
+                "unknown action '$token'"
+            }
+        val action = actions[idx]
+
         try {
             val intent = Intent()
-            val inputs = action.remoteInputs ?: emptyArray()
-            if (reply != null && inputs.isNotEmpty()) {
+            val inputs = action.remoteInputs.orEmpty()
+            if (reply != null) {
+                if (inputs.isEmpty()) return "that notification offers no reply"
                 val bundle = android.os.Bundle()
                 bundle.putCharSequence(inputs[0].resultKey, reply)
                 RemoteInput.addResultsToIntent(inputs, intent, bundle)
             }
-            action.actionIntent?.send(this, 0, intent)
+            val pending = action.actionIntent ?: return "that action can't be invoked"
+            pending.send(this, 0, intent)
         } catch (e: Exception) {
-            Log.w(TAG, "action $idx on $key failed: ${e.message}")
+            Log.w(TAG, "action '$idx' on $key failed: ${e.message}")
+            return "the phone refused that action: ${e.message}"
         }
+        return null
     }
 
     fun dismiss(key: String) {

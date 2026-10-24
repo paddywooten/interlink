@@ -337,13 +337,21 @@ class LinkService : Service() {
                 "notif.action" -> {
                     val key = env.d.str("key") ?: throw Exception("internal: missing key")
                     val token = env.d.str("token") ?: throw Exception("internal: missing token")
-                    LinkNotificationListener.instance?.handleAction(key, token, env.d.str("reply"))
+                    // Both the missing listener and a refused action must fail
+                    // loudly: the laptop toasts success on an empty response,
+                    // and "Reply sent" for a reply that never left is worse
+                    // than an error the user can act on.
+                    val listener = LinkNotificationListener.instance
+                        ?: throw Exception("internal: notification access is not connected on the phone")
+                    listener.handleAction(key, token, env.d.str("reply"))
+                        ?.let { throw Exception("internal: $it") }
                     respond(session, env, objOf())
                 }
 
                 "notif.dismiss" -> {
                     val key = env.d.str("key") ?: throw Exception("internal: missing key")
                     LinkNotificationListener.instance?.dismiss(key)
+                        ?: throw Exception("internal: notification access is not connected on the phone")
                     respond(session, env, objOf())
                 }
 

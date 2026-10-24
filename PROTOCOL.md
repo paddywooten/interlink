@@ -130,7 +130,7 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 
 | type | dir | payload `d` |
 |---|---|---|
-| `notif.post` | P→L | `{key, pkg, app, title, text, bigText?, subText?, category?, when, ongoing?, actions:[{label, token}], hasReply, avatar? (b64 jpeg ≤ 32 KB)}` |
+| `notif.post` | P→L | `{key, pkg, app, title, text, bigText?, subText?, category?, when, ongoing?, actions:[{label, token, reply?}], hasReply, avatar? (b64 jpeg ≤ 32 KB)}` |
 | `notif.remove` | P→L | `{key, pkg}` |
 | `notif.action` | L→P | `{key, token, reply?: string}` — invoke action or send RemoteInput reply |
 | `notif.dismiss` | L→P | `{key}` — cancel notification |
@@ -144,6 +144,15 @@ foreground-service notification would echo straight back forever). An optional
 per-package allowlist exists for users who want to narrow this, but it is
 empty by default — an allowlist is the wrong default, because what it gets
 wrong it gets wrong silently, with the dropped app simply never appearing.
+
+**Actions and replies.** `token` is an index into the posting notification's
+`actions`, and `reply: true` marks the one carrying Android `RemoteInput` —
+the only action a typed reply can be delivered to. The laptop does not have to
+know that index: a `notif.action` with `reply` text and a blank `token` is
+resolved on the phone to the first RemoteInput action. Both an unusable token
+and an action the phone refuses come back as a `notif.action` **error**, never
+an empty success — the laptop toasts success on an empty response, so
+reporting a dropped reply as sent would be worse than reporting it as failed.
 
 ### 4.3 SMS & contacts
 
