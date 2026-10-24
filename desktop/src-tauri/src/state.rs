@@ -53,6 +53,11 @@ pub struct Config {
     pub clipboard_enabled: bool,
     #[serde(default = "default_true")]
     pub auto_accept_files: bool,
+    /// Surface phone events as native OS notifications so they still appear
+    /// with the window minimised to the tray (the in-app list is not enough
+    /// when the user isn't looking at the app).
+    #[serde(default = "default_true")]
+    pub notif_popup: bool,
     #[serde(default)]
     pub download_dir: Option<String>,
 }
@@ -77,6 +82,7 @@ impl Default for Config {
             connection: default_connection(),
             clipboard_enabled: true,
             auto_accept_files: true,
+            notif_popup: true,
             download_dir: None,
         }
     }
@@ -153,6 +159,12 @@ pub struct Outgoing {
     pub done: bool,
 }
 
+/// One screen-mirror frame as it crosses the laptop: frame counter + JPEG.
+///
+/// `None` seeds a fresh [mirror channel](tokio::sync::watch::channel) so a
+/// sink exists before the first frame arrives.
+pub type MirrorFrame = Option<(u32, Vec<u8>)>;
+
 pub struct Inner {
     pub cfg: Config,
     pub cfg_path: PathBuf,
@@ -172,6 +184,12 @@ pub struct Inner {
     /// Serial of the USB device adb currently sees (None = no cable /
     /// no debugging). Refreshed by the connection ticker.
     pub adb_device: Option<String>,
+    /// Latest-frame-wins sink for screen-mirror frames.
+    ///
+    /// See [crate::state::AppState::mirror_sink]: the laptop cannot always
+    /// paint as fast as the phone captures, and queueing those frames would
+    /// turn "a bit slow" into lag that grows without bound.
+    pub mirror_tx: Option<tokio::sync::watch::Sender<MirrorFrame>>,
     /// In-flight "wait for a push" reservations keyed like
     /// `filedone:<tid-b64u>` or `backupresult:<tid-b64u>`.
     pub waiters: HashMap<String, oneshot::Sender<Value>>,
@@ -208,6 +226,7 @@ impl AppState {
                 devices: HashMap::new(),
                 adb_device: None,
                 waiters: HashMap::new(),
+                mirror_tx: None,
             }),
             events,
         })
@@ -328,6 +347,65 @@ impl AppState {
         let _ = self.events.send(serde_json::json!({ "kind": event, "data": payload }));
     }
 
+    /// Whether phone events should also be re-raised as native popups.
+    pub async fn notif_popup(&self) -> bool {
+        self.inner.lock().await.cfg.notif_popup
+    }
+
+    /// The screen-mirror frame sink, created along with its pump task on
+    /// first use.
+    ///
+    /// Mirroring is the one stream where "slow" must never mean "late": the
+    /// phone keeps capturing whether or not the laptop has painted the last
+    /// frame, so any queue between them is a queue of *past* frames and the
+    /// user's latency grows by its full depth. A watch channel holds exactly
+    /// one value — the newest — so a laptop that can't quite keep up shows a
+    /// stuttering but live image instead of a smooth one that is seconds
+    /// behind.
+    pub async fn mirror_sink(
+        &self,
+        app: &tauri::AppHandle,
+    ) -> tokio::sync::watch::Sender<MirrorFrame> {
+        if let Some(tx) = self.inner.lock().await.mirror_tx.clone() {
+            return tx;
+        }
+
+        let (tx, rx) = tokio::sync::watch::channel::<MirrorFrame>(None);
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            pump_mirror_frames(rx, |seq, jpeg| {
+                use base64::Engine as _;
+                use tauri::Emitter;
+                let _ = handle.emit(
+                    "il:ev",
+                    serde_json::json!({
+                        "kind": "push",
+                        "data": {
+                            "t": "mirror.frame",
+                            "d": {
+                                "seq": seq,
+                                "mime": "image/jpeg",
+                                "data": base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                            }
+                        }
+                    }),
+                );
+            })
+            .await;
+            // Sender dropped (mirror stopped, or the link went away) — the
+            // pump is done; a later start creates a fresh one.
+        });
+
+        // Another connection beat us to it; ours is dropped, which quietly
+        // ends the task we just spawned.
+        self.inner
+            .lock()
+            .await
+            .mirror_tx
+            .get_or_insert(tx)
+            .clone()
+    }
+
     /// Drop the current connection, failing all pending requests.
     pub async fn clear_connection(&self) -> Option<PeerInfo> {
         let mut inner = self.inner.lock().await;
@@ -336,6 +414,9 @@ impl AppState {
         }
         inner.data_collectors.clear();
         inner.outgoing.clear();
+        // Dropping the sink ends the mirror pump; a stale frame must not keep
+        // painting over a disconnected screen.
+        inner.mirror_tx = None;
         // Waiters are per-transfer; drop them so callers see a closed channel
         // instead of hanging until their own timeout.
         inner.waiters.clear();
@@ -419,6 +500,37 @@ pub fn local_ip() -> Option<String> {
 
 pub type SharedState = Arc<AppState>;
 
+/// Deliver screen-mirror frames, newest only.
+///
+/// Mirroring is the one stream where "slow" must never mean "late": the phone
+/// keeps capturing whether or not the laptop has painted the previous frame,
+/// so anything queued between the two ends is a queue of *past* frames and
+/// end-to-end latency grows by its full depth for as long as the mirror runs.
+/// A `watch` channel carries exactly one value — the newest — so a frame
+/// written while the last one is being delivered simply replaces it.
+///
+/// The trade is deliberate: a laptop that can't quite keep up shows stutter
+/// (dropped frames) rather than a smooth picture that is seconds behind. For a
+/// live screen, current-but-choppy is strictly better than smooth-and-late.
+///
+/// Returns once every sender is dropped — mirror stopped, or the link went
+/// away.
+pub(crate) async fn pump_mirror_frames<F>(
+    mut rx: tokio::sync::watch::Receiver<MirrorFrame>,
+    mut emit: F,
+) where
+    F: FnMut(u32, Vec<u8>),
+{
+    while rx.changed().await.is_ok() {
+        // Take the newest frame *and* mark it seen in one step, so frames
+        // written while this one was being emitted are picked up next pass
+        // rather than replayed one at a time.
+        if let Some((seq, jpeg)) = rx.borrow_and_update().clone() {
+            emit(seq, jpeg);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +607,46 @@ mod tests {
         state.clear_connection().await;
         assert!(rx.await.is_err(), "closed channel, not a hung await");
         assert!(state.inner.lock().await.waiters.is_empty());
+    }
+
+    /// Ten frames written faster than they can be delivered must collapse to
+    /// the newest one. Queueing them instead is precisely the unbounded lag the
+    /// watch channel exists to prevent: every stale frame on the wire is
+    /// bandwidth spent showing the user the past.
+    #[tokio::test]
+    async fn mirror_pump_keeps_only_the_newest_frame() {
+        let (tx, rx) = tokio::sync::watch::channel::<MirrorFrame>(None);
+        // Nobody is consuming yet, so only the latest write survives.
+        for seq in 0..10u32 {
+            tx.send(Some((seq, vec![0xFF]))).expect("receiver alive");
+        }
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let pump = tokio::spawn(pump_mirror_frames(rx, move |seq, jpeg| {
+            sink.lock().unwrap().push((seq, jpeg));
+        }));
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(tx); // closes the channel, which ends the pump
+        pump.await.expect("pump task");
+
+        assert_eq!(*seen.lock().unwrap(), vec![(9u32, vec![0xFFu8])]);
+    }
+
+    /// Delivery must stop when the sink is dropped (mirror stopped, or the link
+    /// went away) — otherwise a stale last frame could keep painting over a
+    /// session that is already dead.
+    #[tokio::test]
+    async fn mirror_pump_ends_when_sender_drops() {
+        let (tx, rx) = tokio::sync::watch::channel::<MirrorFrame>(None);
+        let pump = tokio::spawn(pump_mirror_frames(rx, |_, _| {}));
+        tx.send(Some((1, vec![0u8]))).expect("receiver alive");
+        drop(tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), pump)
+            .await
+            .expect("pump ends once every sender is gone")
+            .expect("pump task");
     }
 }

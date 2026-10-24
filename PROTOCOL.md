@@ -138,6 +138,13 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 
 `key` = Android `StatusBarNotification.key`.
 
+**Scope: every app, by default.** The phone mirrors a notification from
+whichever package raised it, excluding only InterLink itself (whose own
+foreground-service notification would echo straight back forever). An optional
+per-package allowlist exists for users who want to narrow this, but it is
+empty by default — an allowlist is the wrong default, because what it gets
+wrong it gets wrong silently, with the dropped app simply never appearing.
+
 ### 4.3 SMS & contacts
 
 | type | dir | payload `d` |
@@ -253,6 +260,28 @@ complete JPEG (`seq` = frame counter, no chunking/reassembly); the desktop
 intercepts this tid in its data-collector router and re-emits as the
 `mirror.frame` push above. Base64 is STANDARD — `data:` URLs reject the
 URL-safe alphabet.
+
+**Delivery is latest-frame-wins, not queued, at both ends.** The phone keeps
+capturing whether or not the laptop has painted the previous frame, so any
+queue between them is a queue of *past* frames and end-to-end latency grows by
+the queue's depth for as long as the mirror runs. Neither end is allowed to
+build one:
+
+| end | mechanism |
+|---|---|
+| phone | exactly one send loop; a new frame **overwrites** the not-yet-sent slot rather than launching another send |
+| laptop | the frames feed a single-value watch channel, so a frame written while the previous was being emitted replaces it rather than following it |
+
+The consequence is that a link or laptop that cannot quite keep up shows
+stutter — dropped frames — rather than a smooth picture that drifts seconds
+behind. That trade is deliberate: for a live screen, current-but-choppy is
+strictly better than smooth-and-late, and the lag would otherwise be
+unbounded. `seq` remains monotonic per session; it is a frame counter, not a
+gap signal. The phone also encodes **one** JPEG per frame (no re-encode loop
+to hit a size target) so the frame interval stays predictable.
+
+Losing the link or calling `mirror.stop` drops the laptop's sink, so a stale
+last frame cannot keep painting over a dead session.
 
 ### 4.10 Remote app install
 

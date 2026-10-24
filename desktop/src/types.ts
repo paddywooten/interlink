@@ -41,6 +41,8 @@ export interface Status {
   adbDevice?: string | null;
   clipboardEnabled: boolean;
   autoAcceptFiles: boolean;
+  /** Raise native OS popups for phone notifications / incoming calls. */
+  notifPopup?: boolean;
   downloadDir: string | null;
   battery: Battery | null;
 }

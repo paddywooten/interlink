@@ -5,6 +5,7 @@ mod backup;
 mod commands;
 mod connection;
 mod crypto;
+mod popup;
 mod protocol;
 mod server;
 mod state;
@@ -25,6 +26,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Native popups for phone notifications / incoming calls — see popup.rs.
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let cfg_dir = app.path().app_config_dir()?;
             std::fs::create_dir_all(&cfg_dir)?;
@@ -36,8 +39,21 @@ pub fn run() {
                 let st = state.clone();
                 tauri::async_runtime::spawn(async move {
                     let mut rx = st.events.subscribe();
-                    while let Ok(v) = rx.recv().await {
-                        let _ = handle.emit("il:ev", v);
+                    loop {
+                        match rx.recv().await {
+                            Ok(v) => {
+                                let _ = handle.emit("il:ev", v);
+                            }
+                            // Falling behind is not fatal. broadcast reports
+                            // Lagged when it had to drop the oldest events;
+                            // bailing out here would silently stop *every*
+                            // push — notifications, transfers, call state —
+                            // from reaching the app until it is restarted.
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                log::warn!("webview fell behind; dropped {n} events");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
                     }
                 });
             }

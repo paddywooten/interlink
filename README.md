@@ -22,6 +22,13 @@ Two components, one encrypted protocol:
 - 📋 Clipboard sharing (both directions)
 - 🔌 USB or WiFi — plug the phone in and the link rides the cable through an
   `adb reverse` tunnel; unplug and it falls back to WiFi. No shared network needed.
+- 💤 Stays connected with the phone screen off — a partial wakelock and a
+  high-performance WiFi lock keep the link alive through doze, so the phone
+  doesn't go dark the moment you lock it (the app asks for a battery-optimisation
+  exemption, which some OEM skins bury in their own settings)
+- 🔔 Native popups — every mirrored notification and incoming call also raises
+  an OS notification, so they still reach you with this window minimised to the
+  tray (toggle in Settings)
 - 📦 Remote app install — push an `.apk` from the laptop; the phone shows its
   normal install confirmation and you tap Install on the phone
 - 💾 Backup & restore — contacts, SMS and every photo/video into a plain folder

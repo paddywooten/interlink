@@ -32,6 +32,7 @@ pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> 
         "transport": transport,
         "adbDevice": inner.adb_device,
         "clipboardEnabled": inner.cfg.clipboard_enabled,
+        "notifPopup": inner.cfg.notif_popup,
         "autoAcceptFiles": inner.cfg.auto_accept_files,
         "downloadDir": inner.cfg.download_dir,
         "battery": inner.conn.as_ref().and_then(|c| c.peer.battery.clone()).unwrap_or(Value::Null),
@@ -218,8 +219,11 @@ pub async fn mirror_start(
 /// Stop screen mirroring (phone tears down the MediaProjection service).
 #[tauri::command]
 pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String> {
-    let d = state.request_json("mirror.stop", json!({})).await?;
-    Ok(d)
+    let res = state.request_json("mirror.stop", json!({})).await;
+    // Stop painting regardless of what the phone replied: no frames are
+    // coming, and a leftover sink would only hold a stale frame on screen.
+    state.inner.lock().await.mirror_tx = None;
+    res
 }
 
 /// Send a local file to the phone. Streams chunks, then waits for the phone
@@ -466,6 +470,7 @@ pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result
                     }
                     "clipboard_enabled" => inner.cfg.clipboard_enabled = v.as_bool().unwrap_or(true),
                     "auto_accept_files" => inner.cfg.auto_accept_files = v.as_bool().unwrap_or(true),
+                    "notif_popup" => inner.cfg.notif_popup = v.as_bool().unwrap_or(true),
                     "download_dir" => inner.cfg.download_dir = v.as_str().map(String::from),
                     _ => {}
                 }

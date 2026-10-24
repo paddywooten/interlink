@@ -34,6 +34,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -61,6 +64,9 @@ class ScreenMirrorService : Service() {
 
         /** Fixed transfer id for mirror frames — mirrors desktop MIRROR_TID. */
         val MIRROR_TID: ByteArray = Crypto.tidFromString("interlink-mirror-v1")
+
+        /** One JPEG pass at this quality — see [compress] for why it is one. */
+        private const val COMPRESS_QUALITY = 50
 
         fun stop(context: Context) {
             context.stopService(Intent(context, ScreenMirrorService::class.java))
@@ -190,8 +196,15 @@ class ScreenMirrorService : Service() {
             bmp.recycle()
             if (jpeg.isNotEmpty()) {
                 val client = Bus.client ?: return
-                // Fire-and-forget; drop frames if the link is momentarily busy.
-                scope.launch { runCatching { client.sendData(MIRROR_TID, nextSeq(), jpeg) } }
+                // Newest frame wins. Launching a coroutine per frame *queues*
+                // them, so a phone capturing faster than the link can send
+                // builds an ever-growing backlog of already-stale frames and
+                // the mirror drifts further behind the longer it runs. Exactly
+                // one send loop runs at a time and it always takes whichever
+                // frame is newest, so a busy link costs dropped frames
+                // (stutter) rather than latency that never stops growing.
+                pendingFrame.set(jpeg)
+                startSender(client)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "frame failed: ${t.message}")
@@ -200,12 +213,36 @@ class ScreenMirrorService : Service() {
         }
     }
 
-    private var seq = 0
-    private fun nextSeq(): Int {
-        val s = seq
-        seq = if (seq == Int.MAX_VALUE) 0 else seq + 1
-        return s
+    /** Newest captured frame not yet handed to the link. */
+    private val pendingFrame = AtomicReference<ByteArray?>(null)
+
+    /** True while a send loop is draining [pendingFrame]. */
+    private val sending = AtomicBoolean(false)
+
+    private fun startSender(client: com.interlink.app.core.LinkClient) {
+        if (!sending.compareAndSet(false, true)) return // already draining
+        scope.launch {
+            while (true) {
+                val frame = pendingFrame.getAndSet(null)
+                if (frame == null) {
+                    // Declare the loop idle, then look once more: a frame that
+                    // landed just before we went idle would otherwise sit
+                    // un-sent until the next capture replaced it.
+                    sending.set(false)
+                    if (pendingFrame.get() == null) return@launch
+                    if (!sending.compareAndSet(false, true)) return@launch
+                    continue
+                }
+                runCatching { client.sendData(MIRROR_TID, nextSeq(), frame) }
+            }
+        }
     }
+
+    private val seq = AtomicInteger(0)
+
+    /** Touched only by the single send loop, but atomic so thread hops between
+     *  iterations of Dispatchers.IO can't lose or duplicate a value. */
+    private fun nextSeq(): Int = seq.getAndIncrement()
 
     /** RGBA_8888 Image → Bitmap, honoring row/pixel stride padding. */
     private fun imageToBitmap(image: Image): Bitmap? {
@@ -234,21 +271,30 @@ class ScreenMirrorService : Service() {
         }
     }
 
-    /** JPEG-compress, stepping quality down to keep the frame small on the LAN. */
+    /**
+     * Single JPEG pass.
+     *
+     * This used to re-encode the whole bitmap at successively lower qualities
+     * until the frame fitted a size cap. Compressing is by far the most
+     * expensive thing this service does, so a frame that missed the cap cost
+     * three or four full encodes and arrived late — and with latest-wins
+     * sending a late frame is discarded anyway, so that work was pure waste.
+     *
+     * One encode keeps the frame interval predictable, which is what actually
+     * makes the mirror feel live. At a downscaled width the result is well
+     * inside the old budget anyway.
+     */
     private fun compress(bmp: Bitmap): ByteArray {
-        for (quality in intArrayOf(45, 35, 25)) {
-            val out = ByteArrayOutputStream()
-            bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
-            if (out.size() <= 180 * 1024) return out.toByteArray()
-        }
-        val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 20, out)
+        val out = ByteArrayOutputStream(64 * 1024)
+        bmp.compress(Bitmap.CompressFormat.JPEG, COMPRESS_QUALITY, out)
         return out.toByteArray()
     }
 
     private fun stopMirror() {
         if (!running && projection == null) return
         running = false
+        // Never send a frame from a stopped session.
+        pendingFrame.set(null)
         runCatching { virtualDisplay?.release() }
         runCatching { imageReader?.close() }
         runCatching { projection?.stop() }

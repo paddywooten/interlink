@@ -2,7 +2,10 @@ package com.interlink.app.notif
 
 import android.app.Notification
 import android.app.RemoteInput
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
@@ -20,9 +23,10 @@ import java.util.ArrayDeque
 /**
  * Mirrors notifications to the laptop (PROTOCOL.md §4.2).
  *
- * Allowlist: default = SMS/MMS/dialer apps, overridable via the
- * "il_notif" SharedPreferences set "allow". Replies (RemoteInput) arrive as
- * notif.action {key, token, reply} requests from the laptop.
+ * Scope: every app except this one, with an optional per-package allowlist
+ * ("il_notif" SharedPreferences set "allow"; empty = everything) for users who
+ * want to narrow it. Replies (RemoteInput) arrive as notif.action
+ * {key, token, reply} requests from the laptop.
  */
 class LinkNotificationListener : NotificationListenerService() {
 
@@ -34,17 +38,56 @@ class LinkNotificationListener : NotificationListenerService() {
         var instance: LinkNotificationListener? = null
             private set
 
+        /**
+         * Whether the system has actually bound us.
+         *
+         * Not the same as being enabled in settings: a listener can be ticked
+         * on and still be unbound (after an update, or while the app sits in
+         * the force-stopped state), and when that happens *nothing* mirrors —
+         * silently. The UI reports this so the gap is visible instead of
+         * looking like a granted permission that does nothing.
+         */
+        val isConnected: Boolean
+            get() = instance != null
+
+        /**
+         * Ask the system to re-bind us if we are enabled but not connected.
+         *
+         * Being ticked on in settings does not guarantee a binding: the system
+         * leaves a listener unbound after an app update, and while it is
+         * unbound *nothing* mirrors — no error, no notification, just silence.
+         * `requestRebind` (API 26) is the platform's own remedy, so startup
+         * tries to heal this without bothering the user.
+         *
+         * Best-effort by design: some builds (MIUI among them) ignore it, which
+         * is why the UI also reports the unbound state and points at the
+         * toggle. Returns immediately when already connected, and is ignored
+         * when mirroring was never enabled.
+         */
+        fun requestRebindIfStale(context: Context) {
+            if (instance != null) return
+            val enabled = Settings.Secure.getString(
+                context.contentResolver,
+                "enabled_notification_listeners",
+            )?.contains(context.packageName) == true
+            if (!enabled) return
+            runCatching {
+                NotificationListenerService.requestRebind(
+                    ComponentName(context, LinkNotificationListener::class.java),
+                )
+                Log.i(TAG, "requested listener rebind")
+            }.onFailure {
+                Log.w(TAG, "rebind request failed: ${it.message}")
+            }
+        }
+
         /** token → action index within the notification's actions array. */
-        private val DEFAULT_ALLOW = setOf(
-            "com.android.mms",
-            "com.android.mms.transaction",
-            "com.google.android.apps.messaging",
-            "com.samsung.android.mms",
-            "com.android.dialer",
-            "com.google.android.dialer",
-            "com.samsung.android.dialer",
-            "com.android.incallui",
-        )
+        /**
+         * Never mirrored — our own app above all, whose foreground-service
+         * "Connected" notification would otherwise echo straight back to the
+         * laptop forever.
+         */
+        private val DEFAULT_DENY = setOf("com.interlink.app")
 
         /** Recent dismissals, newest first — served by notif.history. */
         private val history = ArrayDeque<JsonObject>()
@@ -71,9 +114,25 @@ class LinkNotificationListener : NotificationListenerService() {
         }
     }
 
-    private val allow: Set<String>
+    /**
+     * Optional allowlist of packages. Empty — the default — means "mirror
+     * everything that isn't in [DEFAULT_DENY]".
+     *
+     * This defaulted to a short list of SMS and dialer apps, so WhatsApp,
+     * Gmail, Slack and every other app nobody remembered to add were dropped
+     * before they ever reached the laptop. An allowlist is the wrong default:
+     * what it gets wrong, it gets wrong silently.
+     */
+    private val allowlist: Set<String>
         get() = getSharedPreferences("il_notif", MODE_PRIVATE)
-            .getStringSet("allow", DEFAULT_ALLOW) ?: DEFAULT_ALLOW
+            .getStringSet("allow", emptySet()) ?: emptySet()
+
+    /** Whether this package's notifications are mirrored. */
+    private fun mirrored(pkg: String?): Boolean {
+        if (pkg == null || pkg in DEFAULT_DENY) return false
+        val allow = allowlist
+        return allow.isEmpty() || pkg in allow
+    }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -92,7 +151,7 @@ class LinkNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName != null && sbn.packageName !in allow) return
+        if (!mirrored(sbn.packageName)) return
         val n = sbn.notification ?: return
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
@@ -128,7 +187,7 @@ class LinkNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        if (sbn.packageName != null && sbn.packageName !in allow) return
+        if (!mirrored(sbn.packageName)) return
         val n = sbn.notification
         val extras = n?.extras
         remember(

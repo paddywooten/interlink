@@ -45,7 +45,9 @@ import androidx.core.content.ContextCompat
 import com.interlink.app.core.LinkState
 import com.interlink.app.core.LanDiscovery
 import com.interlink.app.core.Prefs
+import com.interlink.app.notif.LinkNotificationListener
 import com.interlink.app.service.LinkService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Root: three tabs — Home (status + permissions), Pair (QR), Settings. */
@@ -108,6 +110,17 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
     // Permission grant state; recomputed whenever `tick` changes.
     var tick by remember { mutableIntStateOf(0) }
     var listenerOn by remember(tick) { mutableStateOf(notifListenerEnabled(context)) }
+
+    // Several rows report live system state — most importantly whether the
+    // notification listener is actually *bound*, which can lag behind its
+    // settings toggle or an app update. Re-check while this screen shows, so
+    // coming back from Settings doesn't leave a stale tick next to a row.
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(2_000)
+            tick++
+        }
+    }
 
     val multiLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -190,10 +203,24 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
 
         Text("Permissions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
+        // Enabled in settings is not the same as bound — an unbound listener
+        // mirrors nothing while still looking granted, so report the real
+        // state. The button always opens the toggle, which is the one remedy
+        // that works everywhere; startup also asks the system for a rebind on
+        // the user's behalf (App.onCreate) so most never see this row.
+        val listenerOk = listenerOn && LinkNotificationListener.isConnected
         PermissionRow(
             label = "Notification access (mirroring)",
-            ok = listenerOn,
-            actionLabel = "Grant",
+            ok = listenerOk,
+            actionLabel = when {
+                listenerOk -> "Granted"
+                listenerOn -> "Fix"
+                else -> "Grant"
+            },
+            enabled = !listenerOk,
+            hint = if (listenerOn && !listenerOk) {
+                "On, but not connected — tap to open the toggle, then switch it off and back on"
+            } else null,
             onAction = {
                 context.startActivity(
                     Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
@@ -209,6 +236,7 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
         RuntimeRow(context, tick, multiLauncher, "Contacts",
             arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.WRITE_CONTACTS))
         InstallAppsRow(context, tick)
+        BatteryRow(context, tick)
         RuntimeRow(context, tick, multiLauncher, "Phone / calls",
             arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS))
         RuntimeRow(context, tick, multiLauncher, "Microphone (call audio)",
@@ -271,6 +299,34 @@ private fun InstallAppsRow(context: Context, tick: Int) {
     )
 }
 
+/**
+ * "Don't optimise" — without it, doze suspends the process when the screen
+ * locks and the link dies even though the service is still nominally running.
+ * Several OEM skins (MIUI among them) block the direct system dialog, so fall
+ * back to the list of throttled apps rather than failing silently.
+ */
+@Composable
+private fun BatteryRow(context: Context, tick: Int) {
+    val ok = remember(tick) { LinkService.batteryOptimizationsIgnored(context) }
+    PermissionRow(
+        label = "Battery — keep the link alive when the screen is off",
+        ok = ok,
+        actionLabel = if (ok) "Unrestricted" else "Allow",
+        enabled = !ok,
+        onAction = {
+            val pkg = context.packageName
+            val direct = Intent(
+                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$pkg"),
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val list = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            runCatching { context.startActivity(direct) }
+                .onFailure { runCatching { context.startActivity(list) } }
+        },
+    )
+}
+
 @Composable
 private fun PermissionRow(
     label: String,
@@ -278,6 +334,7 @@ private fun PermissionRow(
     actionLabel: String,
     enabled: Boolean = true,
     onAction: () -> Unit,
+    hint: String? = null,
 ) {
     Row(
         Modifier.fillMaxWidth(),
@@ -285,7 +342,16 @@ private fun PermissionRow(
     ) {
         Text(if (ok) "✔" else "✖", color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
         Spacer(Modifier.width(8.dp))
-        Text(label, Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            if (hint != null) {
+                Text(
+                    hint,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         OutlinedButton(onClick = onAction, enabled = enabled) { Text(actionLabel) }
     }
 }

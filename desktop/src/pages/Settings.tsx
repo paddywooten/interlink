@@ -413,7 +413,23 @@ export default function Settings() {
         </div>
 
         <div className="card">
-          <div className="card-title">Files & clipboard</div>
+          <div className="card-title">Notifications, files & clipboard</div>
+          <label className="switch-row">
+            <input
+              type="checkbox"
+              checked={status?.notifPopup ?? true}
+              onChange={async (e) => {
+                await save({ notif_popup: e.target.checked });
+              }}
+            />
+            <span>
+              Pop up notifications &amp; incoming calls natively
+              <div className="hint">
+                Shows an OS notification even with this window minimised, so a
+                text or call isn't missed while you're in another app.
+              </div>
+            </span>
+          </label>
           <label className="switch-row">
             <input
               type="checkbox"

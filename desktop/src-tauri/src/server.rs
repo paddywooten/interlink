@@ -348,18 +348,9 @@ async fn handle_connection(
                         // collector: each chunk is one complete JPEG (seq is a
                         // frame counter) and is forwarded straight to the webview.
                         if tid == crate::crypto::mirror_tid() {
-                            state.emit(
-                                "push",
-                                json!({
-                                    "t": "mirror.frame",
-                                    "d": {
-                                        "seq": seq,
-                                        "mime": "image/jpeg",
-                                        "data": base64::engine::general_purpose::STANDARD
-                                            .encode(&chunk),
-                                    }
-                                }),
-                            );
+                            // Latest frame wins rather than queueing — see
+                            // AppState::mirror_sink.
+                            let _ = state.mirror_sink(&app).await.send(Some((seq, chunk)));
                         } else {
                             let collector =
                                 { state.inner.lock().await.data_collectors.get(&tid).cloned() };
@@ -503,6 +494,9 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
                 .await;
         }
     }
+    // Raise a native popup too, so the event is still surfaced with the
+    // window minimised to the tray (the in-app list alone would be missed).
+    crate::popup::maybe_show(state, app, &t, &d).await;
     state.emit("push", json!({ "t": t, "d": d }));
 }
 

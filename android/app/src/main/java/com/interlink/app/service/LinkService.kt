@@ -6,7 +6,10 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -73,6 +76,19 @@ class LinkService : Service() {
         fun stop(context: Context) {
             context.stopService(Intent(context, LinkService::class.java))
         }
+
+        /**
+         * Whether the OS may still throttle or kill us while the screen is off.
+         *
+         * A foreground service is not enough on its own: when the phone goes
+         * into doze the system will happily suspend our process and drop the
+         * socket, so the link dies the moment the screen locks. "Don't
+         * optimise" (a.k.a. unrestricted battery) is what keeps it alive.
+         */
+        fun batteryOptimizationsIgnored(context: Context): Boolean {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            return pm.isIgnoringBatteryOptimizations(context.packageName)
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -81,6 +97,10 @@ class LinkService : Service() {
     private lateinit var callHandler: CallHandler
     private var batteryJob: Job? = null
 
+    /** Held for the life of the service — see [acquireKeepalive]. */
+    private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -88,6 +108,7 @@ class LinkService : Service() {
         client = LinkClient(scope, prefs, ::dispatch, ::onState)
         callHandler = CallHandler(this, client)
         Bus.client = client
+        acquireKeepalive()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -100,12 +121,59 @@ class LinkService : Service() {
     override fun onDestroy() {
         instance = null
         Bus.client = null
+        releaseKeepalive()
         client.stop()
         scope.cancel()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // ——— keep-alive ———
+
+    /**
+     * Stop the OS suspending us while the phone sleeps.
+     *
+     * Without this the link dies as soon as the screen turns off: doze
+     * suspends the CPU, the WebSocket goes quiet, and the laptop sees a dead
+     * phone even though the service is nominally running. A partial wakelock
+     * keeps the CPU able to service the socket, and a high-performance WiFi
+     * lock stops the radio being parked into power-save between packets.
+     *
+     * These are cheap because the service is a persistent foreground service
+     * doing nothing but holding a socket; the CPU stays idle between frames
+     * either way, it just isn't *suspended*.
+     */
+    private fun acquireKeepalive() {
+        if (wakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "InterLink:link").apply {
+                // One reference for the whole service lifetime, so a repeated
+                // start can't leave us holding it forever after a stop.
+                setReferenceCounted(false)
+                @Suppress("DEPRECATION") // LOW_LATENCY is the modern flag; FULL_HIGH_PERF predates 29
+                acquire()
+            }
+        }
+        if (wifiLock == null) {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            wifiLock = wm.createWifiLock(
+                if (Build.VERSION.SDK_INT >= 29) WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                else @Suppress("DEPRECATION") WifiManager.WIFI_MODE_FULL_HIGH_PERF,
+                "InterLink:wifi",
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    private fun releaseKeepalive() {
+        runCatching { wakeLock?.let { if (it.isHeld) it.release() } }
+        wakeLock = null
+        runCatching { wifiLock?.let { if (it.isHeld) it.release() } }
+        wifiLock = null
+    }
 
     // ——— foreground notification ———
 
