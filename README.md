@@ -14,6 +14,7 @@ Two components, one encrypted protocol:
 - 💬 SMS threads — read & send texts from the laptop
 - 🖼️ Gallery browsing, photo download, file transfer both ways
 - 📞 Phone calls — dial pad, answer/decline, audio relay with selectable laptop microphone
+- 📱 Screen mirroring — live phone screen on the laptop (MediaProjection, user-approved)
 - 📋 Clipboard sharing (both directions)
 - 🔊 Ring my phone, battery status, device info
 - 🌐 Nearby devices — see InterLink phones and laptops on the same Wi-Fi automatically
@@ -72,6 +73,18 @@ cd android
 ./gradlew assembleDebug
 # APK: app/build/outputs/apk/debug/app-debug.apk
 ```
+
+> **Calls on Android 15+**: the app declares `MANAGE_ONGOING_CALLS`
+> (`signature|appop`) so Telecom binds its InCallService as NON_UI without
+> replacing your default dialer. It's not runtime-grantable — after installing,
+> grant it once via adb:
+>
+> ```bash
+> adb shell appops set com.interlink.app MANAGE_ONGOING_CALLS allow
+> ```
+>
+> Without this, `call.state` pushes never fire (Telecom skips the binding) and
+> call audio relay won't work. Uninstalling the APK clears the grant.
 
 ## Security model
 

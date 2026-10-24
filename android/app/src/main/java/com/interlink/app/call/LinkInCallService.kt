@@ -6,9 +6,12 @@ import android.os.SystemClock
 import com.interlink.app.core.Bus
 
 /**
- * System bridge for GSM calls. Telecom binds us automatically once the user
- * grants the phone role / call permission; we track state changes and push
- * them to the laptop as call.state (PROTOCOL.md §4.6).
+ * System bridge for GSM calls. Telecom binds us as a NON_UI InCallService —
+ * requires the MANAGE_ONGOING_CALLS appop (declared in the manifest; granted
+ * via `adb shell appops set com.interlink.app MANAGE_ONGOING_CALLS allow`).
+ * Without it Android 15+ classifies this service INVALID and never binds, so
+ * no call.state pushes would ever fire. We track state changes and push them
+ * to the laptop as call.state (PROTOCOL.md §4.6).
  *
  * Manifest declares the standard android.telecom.InCallService intent-filter
  * with BIND_INCALL_SERVICE protection — do not remove.

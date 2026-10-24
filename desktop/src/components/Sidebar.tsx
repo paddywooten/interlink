@@ -6,6 +6,7 @@ const items = [
   { id: "notifications", label: "Notifications", icon: "🔔" },
   { id: "gallery", label: "Gallery", icon: "🖼" },
   { id: "calls", label: "Calls", icon: "☎" },
+  { id: "mirror", label: "Mirror", icon: "📱" },
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 

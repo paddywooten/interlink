@@ -128,7 +128,12 @@ pub async fn media_thumb(state: State<'_, SharedState>, id: String, w: Option<u3
             .await
             .map_err(|_| "busy: thumbnail timeout".to_string())?
             .ok_or_else(|| "internal: stream closed".to_string())?;
-        Ok::<Value, String>(json!({ "data": b64u(&chunk.1), "mime": mime }))
+        Ok::<Value, String>(json!({
+            // Standard base64 — `data:` URLs reject the URL-safe alphabet
+            // (b64u's `-`/`_`), which silently breaks preview rendering.
+            "data": base64::engine::general_purpose::STANDARD.encode(&chunk.1),
+            "mime": mime
+        }))
     }
     .await;
     state.inner.lock().await.data_collectors.remove(&tid);
@@ -164,6 +169,32 @@ pub async fn media_download(
     state.inner.lock().await.data_collectors.remove(&tid);
     let _ = app;
     result
+}
+
+/// Start screen mirroring. The phone launches its MediaProjection consent
+/// dialog; on approval it streams JPEG frames as DATA frames on the fixed
+/// mirror tid, which server.rs forwards to the webview as `mirror.frame`
+/// pushes. Live state arrives via `mirror.state` pushes from the phone.
+#[tauri::command]
+pub async fn mirror_start(
+    state: State<'_, SharedState>,
+    w: Option<u32>,
+    fps: Option<u32>,
+) -> Result<Value, String> {
+    let d = state
+        .request_json(
+            "mirror.start",
+            json!({ "w": w.unwrap_or(720), "fps": fps.unwrap_or(8) }),
+        )
+        .await?;
+    Ok(d)
+}
+
+/// Stop screen mirroring (phone tears down the MediaProjection service).
+#[tauri::command]
+pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String> {
+    let d = state.request_json("mirror.stop", json!({})).await?;
+    Ok(d)
 }
 
 /// Send a local file to the phone. Streams chunks; phone replies file.done push.

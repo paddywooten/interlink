@@ -196,6 +196,25 @@ class LinkService : Service() {
                 "clip.get" -> respond(session, env, DeviceHandler.clipGet(this))
                 "clip.set" -> respond(session, env, DeviceHandler.clipSet(this, env.d))
 
+                // Screen mirroring: launch the consent trampoline (which starts
+                // the MediaProjection foreground service on approval) and reply
+                // immediately; the real start/stop is reported via mirror.state.
+                "mirror.start" -> {
+                    val w = env.d.int("w") ?: 720
+                    val f = env.d.int("fps") ?: 8
+                    val i = Intent(this, com.interlink.app.mirror.ProjectionActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        .putExtra(com.interlink.app.mirror.ScreenMirrorService.EXTRA_WIDTH, w)
+                        .putExtra(com.interlink.app.mirror.ScreenMirrorService.EXTRA_FPS, f)
+                    startActivity(i)
+                    respond(session, env, objOf("status" to "consent_required"))
+                }
+
+                "mirror.stop" -> {
+                    com.interlink.app.mirror.ScreenMirrorService.stop(this)
+                    respond(session, env, objOf("ok" to true))
+                }
+
                 "device.info" -> {
                     val name = prefs.snapshot().deviceName
                     respond(session, env, DeviceHandler.info(this, name))

@@ -344,10 +344,29 @@ async fn handle_connection(
             Some(crate::crypto::KIND_DATA) => {
                 match session_key.open_data(&frame) {
                     Ok((tid, seq, chunk)) => {
-                        let collector = { state.inner.lock().await.data_collectors.get(&tid).cloned() };
-                        if let Some(tx) = collector {
-                            if tx.send((seq, chunk)).await.is_err() {
-                                state.inner.lock().await.data_collectors.remove(&tid);
+                        // Screen-mirror frames stream on a fixed tid with no
+                        // collector: each chunk is one complete JPEG (seq is a
+                        // frame counter) and is forwarded straight to the webview.
+                        if tid == crate::crypto::mirror_tid() {
+                            state.emit(
+                                "push",
+                                json!({
+                                    "t": "mirror.frame",
+                                    "d": {
+                                        "seq": seq,
+                                        "mime": "image/jpeg",
+                                        "data": base64::engine::general_purpose::STANDARD
+                                            .encode(&chunk),
+                                    }
+                                }),
+                            );
+                        } else {
+                            let collector =
+                                { state.inner.lock().await.data_collectors.get(&tid).cloned() };
+                            if let Some(tx) = collector {
+                                if tx.send((seq, chunk)).await.is_err() {
+                                    state.inner.lock().await.data_collectors.remove(&tid);
+                                }
                             }
                         }
                     }

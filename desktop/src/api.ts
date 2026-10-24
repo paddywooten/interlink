@@ -34,6 +34,12 @@ export const mediaThumb = (id: string, w = 320) =>
   invoke<{ data: string; mime: string }>("media_thumb", { id, w });
 export const mediaDownload = (id: string, suggested?: string) =>
   invoke<{ ok: boolean }>("media_download", { id, suggested });
+/** Kick off screen mirroring: the phone shows its MediaProjection consent
+ * dialog, then streams `mirror.frame` pushes and reports lifecycle via
+ * `mirror.state` pushes. */
+export const mirrorStart = (w = 720, fps = 8) =>
+  invoke<{ status: string }>("mirror_start", { w, fps });
+export const mirrorStop = () => invoke<{ ok: boolean }>("mirror_stop");
 export const fileSend = (path: string) =>
   invoke<{ ok: boolean; size: number }>("file_send", { path });
 export const callAudioStart = (callId: string, mic?: string) =>

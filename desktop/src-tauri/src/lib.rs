@@ -64,6 +64,8 @@ pub fn run() {
             commands::media_thumb,
             commands::media_download,
             commands::file_send,
+            commands::mirror_start,
+            commands::mirror_stop,
             commands::list_audio_inputs,
             commands::call_audio_start,
             commands::call_audio_stop,

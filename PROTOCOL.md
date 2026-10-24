@@ -205,6 +205,23 @@ as remote control + phone speaker.)
 `ok:false` responses carry `e` with a stable code prefix:
 `perm:` (missing Android permission), `busy:`, `not_found:`, `internal:`.
 
+### 4.9 Screen mirror
+
+| type | dir | payload `d` |
+|---|---|---|
+| `mirror.start` | L→P | `{w?:720, fps?:8}` → `{status:"consent_required"}`. Phone launches the MediaProjection consent dialog; frames only flow after the user approves. |
+| `mirror.stop` | L→P | `{}` → `{ok:true}` |
+| `mirror.state` | P→L push | `{active:true, pending?}` when consent granted / starting; `{active:false, reason?:"denied"}` on stop or denial |
+| `mirror.frame` | P→L push | `{seq, mime:"image/jpeg", data}` — STANDARD base64 JPEG, one complete frame per push. Desktop routes fixed-tid kind-`0x02` frames here. |
+
+The live frame stream rides kind `0x02` (data) frames on a **fixed tid** =
+`sha256("interlink-mirror-v1")[..16]` — identical derivation on all three
+platforms (`crypto::mirror_tid()` / `Crypto.tidFromString()`). Each frame is a
+complete JPEG (`seq` = frame counter, no chunking/reassembly); the desktop
+intercepts this tid in its data-collector router and re-emits as the
+`mirror.frame` push above. Base64 is STANDARD — `data:` URLs reject the
+URL-safe alphabet.
+
 ---
 
 ## 5. Capability negotiation

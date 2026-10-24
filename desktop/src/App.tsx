@@ -8,6 +8,7 @@ import Messages from "./pages/Messages";
 import Notifications from "./pages/Notifications";
 import Gallery from "./pages/Gallery";
 import Calls from "./pages/Calls";
+import Mirror from "./pages/Mirror";
 import Settings from "./pages/Settings";
 import QrModal from "./components/QrModal";
 import {
@@ -135,6 +136,15 @@ export default function App() {
           case "file.offer":
             toast(`Phone offered "${d.name}" — enable auto-accept in Settings`, "info");
             break;
+          case "mirror.frame":
+            // High-frequency (8fps): don't touch the store — hand the JPEG to
+            // the Mirror page via a CustomEvent so it can paint without
+            // re-rendering React.
+            window.dispatchEvent(new CustomEvent("il:mirror-frame", { detail: d }));
+            break;
+          case "mirror.state":
+            window.dispatchEvent(new CustomEvent("il:mirror-state", { detail: d }));
+            break;
           case "unpair":
             refresh();
             toast("Phone unpaired", "info");
@@ -169,6 +179,9 @@ export default function App() {
       break;
     case "calls":
       pageEl = <Calls />;
+      break;
+    case "mirror":
+      pageEl = <Mirror />;
       break;
     case "settings":
       pageEl = <Settings />;

@@ -160,3 +160,48 @@ pub fn tid_from_str(s: &str) -> [u8; 16] {
     tid.copy_from_slice(&h[..16]);
     tid
 }
+
+/// Fixed transfer id for live screen-mirror JPEG frames. Must match the
+/// phone's `ScreenMirrorService.MIRROR_TID = Crypto.tidFromString("interlink-mirror-v1")`.
+/// (sha256 of a constant — cheap, no caching needed.)
+pub fn mirror_tid() -> [u8; 16] {
+    tid_from_str("interlink-mirror-v1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mirror tid is a cross-platform constant: desktop routes on it,
+    /// the phone seals with it. If this value ever changes on one side only,
+    /// mirror frames are silently dropped — so pin the derivation.
+    #[test]
+    fn mirror_tid_is_sha256_prefix_of_protocol_constant() {
+        use sha2::Digest;
+        let full = Sha256::digest(b"interlink-mirror-v1");
+        let mut expected = [0u8; 16];
+        expected.copy_from_slice(&full[..16]);
+        assert_eq!(mirror_tid(), expected);
+        // It must be a pure prefix of sha256 — not, e.g., a full-hash xor.
+        assert_eq!(&mirror_tid()[..], &full[..16]);
+    }
+
+    /// Data frames on the mirror tid must round-trip through seal/open with the
+    /// tid intact — this is exactly what server.rs matches against to forward
+    /// mirror.frame pushes.
+    #[test]
+    fn mirror_data_frame_round_trips() {
+        let k = frame_key([7u8; 32]);
+        let tid = mirror_tid();
+        let frame = k.seal_data(&tid, 42, &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
+        let (rtid, seq, chunk) = k.open_data(&frame).expect("open");
+        assert_eq!(rtid, tid);
+        assert_eq!(seq, 42);
+        assert_eq!(chunk, vec![0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3]);
+        assert_eq!(rtid, crypto_mirror_tid_reference());
+    }
+
+    fn crypto_mirror_tid_reference() -> [u8; 16] {
+        tid_from_str("interlink-mirror-v1")
+    }
+}

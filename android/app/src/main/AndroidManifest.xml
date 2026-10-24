@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -27,6 +28,11 @@
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <!-- signature|appop: grants Telecom a NON_UI InCallService binding on
+         Android 15+, so call.state pushes and call audio work without
+         replacing the user's default dialer. Granted via:
+         adb shell appops set com.interlink.app MANAGE_ONGOING_CALLS allow -->
+    <uses-permission android:name="android.permission.MANAGE_ONGOING_CALLS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -68,6 +74,17 @@
             android:name=".service.LinkService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging|microphone|phoneCall" />
+
+        <!-- Screen mirroring: MediaProjection foreground service + consent trampoline -->
+        <service
+            android:name=".mirror.ScreenMirrorService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+        <activity
+            android:name=".mirror.ProjectionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Notification mirroring -->
         <service
