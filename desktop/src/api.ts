@@ -134,8 +134,8 @@ export const notifHistory = (limit = 100) =>
 export const notifAction = (key: string, token: string, reply?: string) =>
   req("notif.action", { key, token, reply });
 export const notifDismiss = (key: string) => req("notif.dismiss", { key }).catch(() => undefined);
-export const mediaList = (offset: number, limit: number, type = "all") =>
-  req<{ total: number; items: MediaItem[] }>("media.list", { offset, limit, type });
+export const mediaList = (offset: number, limit: number, type = "all", q?: string) =>
+  req<{ total: number; items: MediaItem[] }>("media.list", { offset, limit, type, q });
 export const callDial = (number: string) => req<{ callId: string }>("call.dial", { number });
 export const callAnswer = (callId: string) => req("call.answer", { callId }).catch(() => undefined);
 export const callDecline = (callId: string) => req("call.decline", { callId }).catch(() => undefined);

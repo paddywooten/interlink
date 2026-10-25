@@ -100,7 +100,12 @@ export interface MediaItem {
   w?: number;
   h?: number;
   date: number;
+  /** Milliseconds, when the media has a duration (video, audio). */
   dur?: number;
+  /** Music only — display metadata; the file itself still arrives as `name`. */
+  title?: string;
+  artist?: string;
+  album?: string;
 }
 
 export interface CallState {

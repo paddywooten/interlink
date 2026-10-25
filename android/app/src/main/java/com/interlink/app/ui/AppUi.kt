@@ -241,9 +241,13 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
             arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS))
         RuntimeRow(context, tick, multiLauncher, "Microphone (call audio)",
             arrayOf(Manifest.permission.RECORD_AUDIO))
-        RuntimeRow(context, tick, multiLauncher, "Media (photos & videos)",
+        RuntimeRow(context, tick, multiLauncher, "Media (photos, videos & music)",
             if (Build.VERSION.SDK_INT >= 33) {
-                arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
+                arrayOf(
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VIDEO,
+                    Manifest.permission.READ_MEDIA_AUDIO,
+                )
             } else {
                 arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
             })

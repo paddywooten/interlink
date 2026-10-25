@@ -5,6 +5,7 @@ const items = [
   { id: "messages", label: "Messages", icon: "✉" },
   { id: "notifications", label: "Notifications", icon: "🔔" },
   { id: "gallery", label: "Gallery", icon: "🖼" },
+  { id: "music", label: "Music", icon: "♪" },
   { id: "contacts", label: "Contacts", icon: "👥" },
   { id: "calls", label: "Calls", icon: "☎" },
   { id: "mirror", label: "Mirror", icon: "📱" },

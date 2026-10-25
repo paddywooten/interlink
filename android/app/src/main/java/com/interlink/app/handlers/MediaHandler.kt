@@ -41,10 +41,10 @@ import kotlin.math.max
 /**
  * Media browsing + transfers (PROTOCOL.md §4.4).
  *
- * Media ids are "<prefix>:<mediaStoreId>" where prefix is "i" (image) or
- * "v" (video), so a bare numeric id from MediaStore is never ambiguous.
- * Thumbnails and full files are streamed back as kind-0x02 DATA frames over
- * the tid the laptop pre-registers in the request payload.
+ * Media ids are "<prefix>:<mediaStoreId>" where prefix is "i" (image),
+ * "v" (video) or "a" (audio), so a bare numeric id from MediaStore is never
+ * ambiguous. Thumbnails and full files are streamed back as kind-0x02 DATA
+ * frames over the tid the laptop pre-registers in the request payload.
  */
 object MediaHandler {
     private const val TAG = "MediaHandler"
@@ -62,6 +62,21 @@ object MediaHandler {
         val type = d.str("type") ?: "all"
         val offset = (d.int("offset") ?: 0).coerceAtLeast(0)
         val limit = (d.int("limit") ?: 50).coerceIn(1, 100)
+
+        // Music is its own collection with its own ordering: a library gets
+        // browsed by title, not by how recently the file was copied over —
+        // and a substring filter is what makes 5,000 songs reachable at all.
+        // "all" deliberately stays photos+videos; the Music page always asks
+        // for type "audio" explicitly, so the gallery grid never fills up
+        // with rows that have nothing to draw.
+        if (type == "audio") {
+            val q = d.str("q")?.trim()?.takeIf { it.isNotEmpty() }
+            val page = queryAudio(context, offset + limit, q).drop(offset).take(limit)
+            return buildJsonObject {
+                put("total", if (q == null) countFor(context, type) else countAudio(context, q))
+                put("items", buildJsonArray { page.forEach { add(it) } })
+            }
+        }
 
         // Newest (offset + limit) from each collection, merged by date desc.
         val need = offset + limit
@@ -106,6 +121,9 @@ object MediaHandler {
     }
 
     private fun countFor(context: Context, type: String): Long {
+        if (type == "audio") {
+            return countOf(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, "a")
+        }
         var total = 0L
         if (type == "all" || type == "image") {
             total += countOf(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "i")
@@ -167,9 +185,142 @@ object MediaHandler {
         return items
     }
 
+    /**
+     * Audio columns, named once.
+     *
+     * Kotlin cannot use a Java class name as a value — `val a = MediaStore.Audio.Media`
+     * is a type, not an expression — so the music queries alias the constants
+     * instead of spelling `MediaStore.Audio.Media.TITLE` at every use site.
+     */
+    private object Cols {
+        val URI = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        val ID = MediaStore.Audio.Media._ID
+        val TITLE = MediaStore.Audio.Media.TITLE
+        val ARTIST = MediaStore.Audio.Media.ARTIST
+        val ALBUM = MediaStore.Audio.Media.ALBUM
+        val DURATION = MediaStore.Audio.Media.DURATION
+        val SIZE = MediaStore.Audio.Media.SIZE
+        val DATE_ADDED = MediaStore.Audio.Media.DATE_ADDED
+        val MIME_TYPE = MediaStore.Audio.Media.MIME_TYPE
+        val DISPLAY_NAME = MediaStore.Audio.Media.DISPLAY_NAME
+    }
+
+    /**
+     * Songs, ordered by title then artist — Music's ordering, not the
+     * date-desc the photo grid uses.
+     *
+     * [need] is offset+limit and the caller drops the first `offset` rows,
+     * the same shape [queryCollection] uses: a late page costs more to fetch
+     * than an early one, which is a fair trade for never needing an
+     * undocumented `LIMIT/OFFSET` clause in a `sortOrder`.
+     *
+     * [q] is a case-insensitive substring match across title, artist and
+     * album. With ~5,000 tracks, search *is* the navigation — scrolling to
+     * song 4,000 is not a thing anyone does.
+     */
+    private fun queryAudio(context: Context, need: Int, q: String?): List<JsonObject> {
+        val projection = arrayOf(
+            Cols.ID, Cols.TITLE, Cols.ARTIST, Cols.ALBUM, Cols.DURATION,
+            Cols.SIZE, Cols.DATE_ADDED, Cols.MIME_TYPE, Cols.DISPLAY_NAME,
+        )
+        val selection: String?
+        val args: Array<String>?
+        if (q == null) {
+            selection = null
+            args = null
+        } else {
+            selection = searchSelection()
+            args = Array(3) { likePattern(q) }
+        }
+        val order = "${Cols.TITLE} COLLATE NOCASE ASC, ${Cols.ARTIST} COLLATE NOCASE ASC, ${Cols.ID} ASC"
+        val items = mutableListOf<JsonObject>()
+        try {
+            context.contentResolver.query(
+                Cols.URI, projection, selection, args, order,
+            )?.use { c ->
+                val idIdx = c.getColumnIndex(Cols.ID)
+                val titleIdx = c.getColumnIndex(Cols.TITLE)
+                val artistIdx = c.getColumnIndex(Cols.ARTIST)
+                val albumIdx = c.getColumnIndex(Cols.ALBUM)
+                val durIdx = c.getColumnIndex(Cols.DURATION)
+                val sizeIdx = c.getColumnIndex(Cols.SIZE)
+                val dateIdx = c.getColumnIndex(Cols.DATE_ADDED)
+                val mimeIdx = c.getColumnIndex(Cols.MIME_TYPE)
+                val nameIdx = c.getColumnIndex(Cols.DISPLAY_NAME)
+                while (c.moveToNext() && items.size < need) {
+                    val file = if (nameIdx >= 0) c.getString(nameIdx) else null
+                    val title = if (titleIdx >= 0) c.getString(titleIdx) else null
+                    items.add(
+                        buildJsonObject {
+                            put("id", "a:${c.getLong(idIdx)}")
+                            // `name` stays the real filename: it is what the
+                            // laptop saves the track as.
+                            put("name", file ?: "track")
+                            put("title", title ?: file ?: "Untitled")
+                            put("artist", meta(if (artistIdx >= 0) c.getString(artistIdx) else null))
+                            put("album", meta(if (albumIdx >= 0) c.getString(albumIdx) else null))
+                            put("mime", if (mimeIdx >= 0) c.getString(mimeIdx) ?: "audio/*" else "audio/*")
+                            put("size", if (sizeIdx >= 0 && !c.isNull(sizeIdx)) c.getLong(sizeIdx) else 0L)
+                            // DATE_ADDED is seconds — protocol wants epoch millis.
+                            put("date", (if (dateIdx >= 0) c.getLong(dateIdx) else 0L) * 1000)
+                            if (durIdx >= 0 && !c.isNull(durIdx)) put("dur", c.getLong(durIdx))
+                        },
+                    )
+                }
+            }
+        } catch (e: SecurityException) {
+            throw Exception("perm: music permission not granted")
+        }
+        return items
+    }
+
+    /** Matched-row count for a filtered music page — [countOf] can't see the filter. */
+    private fun countAudio(context: Context, q: String): Long {
+        return try {
+            context.contentResolver.query(
+                Cols.URI, arrayOf(Cols.ID),
+                searchSelection(),
+                Array(3) { likePattern(q) }, null,
+            )?.use { it.count.toLong() } ?: 0L
+        } catch (e: SecurityException) {
+            throw Exception("perm: music permission not granted")
+        }
+    }
+
+    /**
+     * WHERE for a music search: one substring match across the three fields a
+     * person actually types into — title, artist, album.
+     *
+     * The `ESCAPE` clause is load-bearing. SQLite has **no** default LIKE
+     * escape character (unlike MySQL), so without it a backslash is just an
+     * ordinary byte: searching for "100%" compiles to `%100\%%` and looks for
+     * a literal backslash, matching nothing at all.
+     */
+    private fun searchSelection(): String =
+        "(${Cols.TITLE} LIKE ? ESCAPE '\\' OR ${Cols.ARTIST} LIKE ? ESCAPE '\\' OR ${Cols.ALBUM} LIKE ? ESCAPE '\\')"
+
+    /**
+     * `%query%` for a SQL `LIKE`, with `_` and `%` escaped so they stay
+     * literal — pairs with [searchSelection]'s ESCAPE clause.
+     */
+    private fun likePattern(q: String): String =
+        "%" + q.replace(Regex("[%_]")) { "\\" + it.value } + "%"
+
+    /**
+     * MediaStore writes the literal string `<unknown>` where a file carries no
+     * tag, which reads as a bug on screen. Normalise it to empty so the laptop
+     * can draw its own placeholder instead.
+     */
+    private fun meta(v: String?): String =
+        v?.takeIf { it.isNotBlank() && it != "<unknown>" } ?: ""
+
     // ——— shared id resolution ———
 
-    private data class Entry(val id: Long, val contentUri: Uri, val isImage: Boolean)
+    /**
+     * `kind` is "image" | "video" | "audio". It decides the fallback mime and
+     * whether the row has a thumbnail at all — only audio has none.
+     */
+    private data class Entry(val id: Long, val contentUri: Uri, val kind: String)
 
     private fun resolve(idStr: String): Entry {
         val parts = idStr.split(":", limit = 2)
@@ -177,8 +328,9 @@ object MediaHandler {
         val prefix = parts[0]
         val id = parts[1].toLongOrNull() ?: throw Exception("not_found: bad media id")
         return when (prefix) {
-            "i" -> Entry(id, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true)
-            "v" -> Entry(id, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, false)
+            "i" -> Entry(id, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image")
+            "v" -> Entry(id, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "video")
+            "a" -> Entry(id, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, "audio")
             else -> throw Exception("not_found: unknown media id")
         }
     }
@@ -188,7 +340,7 @@ object MediaHandler {
     private fun metadata(context: Context, e: Entry): Triple<String, Long, String> {
         var name = "media_${e.id}"
         var size = 0L
-        var mime = if (e.isImage) "image/*" else "video/*"
+        var mime = "${e.kind}/*"
         context.contentResolver.query(
             uriOf(e), arrayOf(
                 MediaStore.MediaColumns.DISPLAY_NAME,
@@ -233,8 +385,12 @@ object MediaHandler {
         }
 
     private fun loadThumbBitmap(context: Context, e: Entry, width: Int): Bitmap? {
+        // Audio carries no poster frame, and MediaStore's thumbnail lookup for
+        // an audio id would find nothing anyway. Say so before doing the work —
+        // the Music page draws a glyph and never asks.
+        if (e.kind == "audio") return null
         // Videos: MediaStore mini-thumbnail.
-        if (!e.isImage) {
+        if (e.kind == "video") {
             @Suppress("DEPRECATION")
             MediaStore.Video.Thumbnails.getThumbnail(
                 context.contentResolver, e.id, MediaStore.Video.Thumbnails.MINI_KIND, null,

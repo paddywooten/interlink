@@ -7,10 +7,12 @@ import Dashboard from "./pages/Dashboard";
 import Messages from "./pages/Messages";
 import Notifications from "./pages/Notifications";
 import Gallery from "./pages/Gallery";
+import Music from "./pages/Music";
 import Contacts from "./pages/Contacts";
 import Calls from "./pages/Calls";
 import Mirror from "./pages/Mirror";
 import Settings from "./pages/Settings";
+import PlayerBar from "./components/PlayerBar";
 import QrModal from "./components/QrModal";
 import {
   addNotification,
@@ -28,6 +30,9 @@ export default function App() {
   const page = useStore((s) => s.page);
   const connected = useStore((s) => s.connected);
   const status = useStore((s) => s.status);
+  // Truthy once a queue exists — full-height pages need to make room for the
+  // player bar rather than let it sit on top of their composer.
+  const music = useStore((s) => s.music !== null);
 
   // Initial status + event stream
   useEffect(() => {
@@ -193,6 +198,9 @@ export default function App() {
     case "gallery":
       pageEl = <Gallery />;
       break;
+    case "music":
+      pageEl = <Music />;
+      break;
     case "contacts":
       pageEl = <Contacts />;
       break;
@@ -212,13 +220,15 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar />
-      <main className={`main ${connected ? "" : "offline"}`}>
+      <main className={`main ${connected ? "" : "offline"} ${music ? "has-player" : ""}`}>
         {!connected && status?.paired && (
           <div className="offline-banner">
             <span className="dot" /> Phone disconnected — waiting for it to reconnect…
           </div>
         )}
         {pageEl}
+        {/* Outside the switch so browsing away mid-track doesn't stop it. */}
+        <PlayerBar />
       </main>
       <Toasts />
       <QrModal />

@@ -193,7 +193,7 @@ export default function Gallery() {
                   <div className="media-ph">
                     <span className="media-glyph">
                       {m.mime.startsWith("video/")
-                        ? `▶${m.dur ? ` ${Math.round(m.dur)}s` : ""}`
+                        ? `▶${m.dur ? ` ${Math.round(m.dur / 1000)}s` : ""}`
                         : "…"}
                     </span>
                   </div>

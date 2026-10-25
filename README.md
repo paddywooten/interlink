@@ -15,6 +15,10 @@ Two components, one encrypted protocol:
 - 👥 Contacts — the whole address book on the laptop, searchable, tap to call
 - 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
   thumbnails, and in-app video playback (download once, then play from disk)
+- 🎵 Music — the phone's whole song library, searchable by title, artist or
+  album, with an always-on player: queue, seek, next/prev and volume. Tracks
+  download to `~/InterLink/Music` as you play them and keep playing while you
+  browse the rest of the app
 - 📞 Phone calls — dial pad, answer/decline, and per-call audio routing: speak
   through any laptop mic (or the phone) and hear through any laptop output
   (laptop speakers, a Bluetooth speaker, HDMI — or the phone)
