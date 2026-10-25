@@ -32,12 +32,30 @@ export const revealInFolder = (path: string) =>
   invoke("reveal_in_folder", { path });
 export const mediaThumb = (id: string, w = 320) =>
   invoke<{ data: string; mime: string }>("media_thumb", { id, w });
+/** Save a photo/video from the phone onto the laptop. Playback deliberately
+ * does *not* use this — see [mediaStreamUrl]. */
 export const mediaDownload = (id: string, suggested?: string, subdir?: string) =>
   invoke<{ ok: boolean; path: string; size: number }>("media_download", {
     id,
     suggested,
     subdir,
   });
+
+/** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
+ * the value lands in an SQL `ORDER BY`, so the phone only ever honours names
+ * it recognises. */
+export type MusicSort = "title" | "artist" | "album" | "duration" | "date" | "name";
+
+/**
+ * A URL the webview can put straight into `<audio>` / `<video>` and play.
+ *
+ * The phone serves the bytes itself with HTTP range support, so playback
+ * begins at the first block instead of after a full download, seeking costs
+ * one request rather than a re-fetch, and nothing is written to the laptop.
+ * The URL carries a per-process token the phone only hands out over the
+ * encrypted link, so a stale one simply gets a 401.
+ */
+export const mediaStreamUrl = (id: string) => invoke<string>("media_stream_url", { id });
 /** Kick off screen mirroring: the phone shows its MediaProjection consent
  * dialog, then streams `mirror.frame` pushes and reports lifecycle via
  * `mirror.state` pushes. */
@@ -134,8 +152,22 @@ export const notifHistory = (limit = 100) =>
 export const notifAction = (key: string, token: string, reply?: string) =>
   req("notif.action", { key, token, reply });
 export const notifDismiss = (key: string) => req("notif.dismiss", { key }).catch(() => undefined);
-export const mediaList = (offset: number, limit: number, type = "all", q?: string) =>
-  req<{ total: number; items: MediaItem[] }>("media.list", { offset, limit, type, q });
+export const mediaList = (
+  offset: number,
+  limit: number,
+  type = "all",
+  q?: string,
+  sort?: MusicSort,
+  dir?: "asc" | "desc",
+) =>
+  req<{ total: number; items: MediaItem[] }>("media.list", {
+    offset,
+    limit,
+    type,
+    q,
+    sort,
+    dir,
+  });
 export const callDial = (number: string) => req<{ callId: string }>("call.dial", { number });
 export const callAnswer = (callId: string) => req("call.answer", { callId }).catch(() => undefined);
 export const callDecline = (callId: string) => req("call.decline", { callId }).catch(() => undefined);

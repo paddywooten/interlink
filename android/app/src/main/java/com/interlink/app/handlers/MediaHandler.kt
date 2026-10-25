@@ -71,7 +71,8 @@ object MediaHandler {
         // with rows that have nothing to draw.
         if (type == "audio") {
             val q = d.str("q")?.trim()?.takeIf { it.isNotEmpty() }
-            val page = queryAudio(context, offset + limit, q).drop(offset).take(limit)
+            val order = audioOrder(d.str("sort"), d.str("dir"))
+            val page = queryAudio(context, offset + limit, q, order).drop(offset).take(limit)
             return buildJsonObject {
                 put("total", if (q == null) countFor(context, type) else countAudio(context, q))
                 put("items", buildJsonArray { page.forEach { add(it) } })
@@ -218,7 +219,43 @@ object MediaHandler {
      * album. With ~5,000 tracks, search *is* the navigation — scrolling to
      * song 4,000 is not a thing anyone does.
      */
-    private fun queryAudio(context: Context, need: Int, q: String?): List<JsonObject> {
+    /**
+     * `ORDER BY` for the music table, from a whitelisted sort key.
+     *
+     * The whitelist is load-bearing, not decoration: this string is pasted
+     * into the SQL that `queryAudio` runs, so a client-chosen column name
+     * would be an injection hole with `READ_MEDIA_AUDIO` behind it. Anything
+     * not in this `when` falls back to title.
+     *
+     * Text columns carry `COLLATE NOCASE` so a title sorts the way a person
+     * reads it; the numeric ones must **not**, because collating an INTEGER
+     * compares its text form and puts `10` before `9`.
+     *
+     * `_id` is always appended. Without a unique tiebreaker SQLite is free to
+     * return equal keys in a different order each pass, which lets the pager's
+     * `LIMIT offset,n` window skip or repeat a row while scrolling a
+     * 5,000-song library.
+     */
+    private fun audioOrder(sort: String?, dir: String?): String {
+        val d = if (dir.equals("desc", ignoreCase = true)) "DESC" else "ASC"
+        if (sort.isNullOrBlank()) {
+            // Default: title, then artist (two tracks may share a title), then id.
+            return "${Cols.TITLE} COLLATE NOCASE $d, ${Cols.ARTIST} COLLATE NOCASE $d, ${Cols.ID} $d"
+        }
+        val column = when (sort) {
+            "title" -> "${Cols.TITLE} COLLATE NOCASE"
+            "artist" -> "${Cols.ARTIST} COLLATE NOCASE"
+            "album" -> "${Cols.ALBUM} COLLATE NOCASE"
+            "name" -> "${Cols.DISPLAY_NAME} COLLATE NOCASE"
+            "duration" -> Cols.DURATION
+            "date" -> Cols.DATE_ADDED
+            "size" -> Cols.SIZE
+            else -> "${Cols.TITLE} COLLATE NOCASE"
+        }
+        return "$column $d, ${Cols.ID} $d"
+    }
+
+    private fun queryAudio(context: Context, need: Int, q: String?, order: String): List<JsonObject> {
         val projection = arrayOf(
             Cols.ID, Cols.TITLE, Cols.ARTIST, Cols.ALBUM, Cols.DURATION,
             Cols.SIZE, Cols.DATE_ADDED, Cols.MIME_TYPE, Cols.DISPLAY_NAME,
@@ -232,7 +269,6 @@ object MediaHandler {
             selection = searchSelection()
             args = Array(3) { likePattern(q) }
         }
-        val order = "${Cols.TITLE} COLLATE NOCASE ASC, ${Cols.ARTIST} COLLATE NOCASE ASC, ${Cols.ID} ASC"
         val items = mutableListOf<JsonObject>()
         try {
             context.contentResolver.query(
@@ -319,10 +355,14 @@ object MediaHandler {
     /**
      * `kind` is "image" | "video" | "audio". It decides the fallback mime and
      * whether the row has a thumbnail at all — only audio has none.
+     *
+     * `internal` rather than private: [MediaStream] resolves the same ids over
+     * HTTP, and a second parsing of "<prefix>:<id>" would be a second place for
+     * it to drift.
      */
-    private data class Entry(val id: Long, val contentUri: Uri, val kind: String)
+    internal data class Entry(val id: Long, val contentUri: Uri, val kind: String)
 
-    private fun resolve(idStr: String): Entry {
+    internal fun resolve(idStr: String): Entry {
         val parts = idStr.split(":", limit = 2)
         if (parts.size != 2) throw Exception("not_found: bad media id")
         val prefix = parts[0]
@@ -335,9 +375,9 @@ object MediaHandler {
         }
     }
 
-    private fun uriOf(e: Entry): Uri = ContentUris.withAppendedId(e.contentUri, e.id)
+    internal fun uriOf(e: Entry): Uri = ContentUris.withAppendedId(e.contentUri, e.id)
 
-    private fun metadata(context: Context, e: Entry): Triple<String, Long, String> {
+    internal fun metadata(context: Context, e: Entry): Triple<String, Long, String> {
         var name = "media_${e.id}"
         var size = 0L
         var mime = "${e.kind}/*"

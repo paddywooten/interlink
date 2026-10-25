@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import * as api from "../api";
+import type { MusicSort } from "../api";
 import type { MediaItem } from "../types";
 import { extendMusicQueue, playMusic, toast, useStore } from "../store";
 
@@ -12,11 +14,48 @@ function fmtDur(ms?: number) {
 }
 
 /**
+ * A column header that re-orders the list when clicked.
+ *
+ * It stays a `<span>` because `.track-head` aligns its first and last cells by
+ * element type, and putting the `<button>` inside keeps that layout intact
+ * while giving the interaction a real control. Clicking the column you are
+ * already sorted by reverses it — how every table anyone has used behaves.
+ */
+function Th(props: {
+  field: MusicSort;
+  active: MusicSort;
+  dir: "asc" | "desc";
+  onPick: (f: MusicSort) => void;
+  children: ReactNode;
+}) {
+  const on = props.active === props.field;
+  return (
+    <span>
+      <button
+        type="button"
+        className={`th${on ? " on" : ""}`}
+        onClick={() => props.onPick(props.field)}
+        title={
+          on
+            ? `${props.children} — click to reverse`
+            : `Sort by ${String(props.children).toLowerCase()}`
+        }
+      >
+        {props.children}
+        {on ? (props.dir === "asc" ? " ▲" : " ▼") : ""}
+      </button>
+    </span>
+  );
+}
+
+/**
  * The phone's music library, browsed and played back through the laptop.
  *
  * Search runs on the phone rather than over the loaded list: with ~5,000
  * tracks there is no page here big enough to filter locally, and shipping the
- * whole library to find three matches would be the wrong trade.
+ * whole library to find three matches would be the wrong trade. Sorting is
+ * the same argument — the phone owns the ordering (and the `ORDER BY` it
+ * builds), so this page just says which column and which direction.
  */
 export default function Music() {
   const connected = useStore((s) => s.connected);
@@ -29,6 +68,8 @@ export default function Music() {
   const [loading, setLoading] = useState(false);
   const [q, setQ] = useState("");
   const [term, setTerm] = useState("");
+  const [sort, setSort] = useState<MusicSort>("title");
+  const [dir, setDir] = useState<"asc" | "desc">("asc");
   /** The phone handed back a short page — there is nothing after this one. */
   const [exhausted, setExhausted] = useState(false);
   const sentinel = useRef<HTMLDivElement>(null);
@@ -54,7 +95,7 @@ export default function Music() {
       const tok = reqToken.current;
       setLoading(true);
       try {
-        const r = await api.mediaList(from, PAGE, "audio", term);
+        const r = await api.mediaList(from, PAGE, "audio", term, sort, dir);
         if (tok !== reqToken.current) return; // a newer search owns the list
         setTotal(r.total ?? 0);
         setItems((prev) => (reset ? r.items : [...prev, ...r.items]));
@@ -69,7 +110,7 @@ export default function Music() {
         if (tok === reqToken.current) setLoading(false);
       }
     },
-    [connected, term, loading, exhausted],
+    [connected, term, sort, dir, loading, exhausted],
   );
 
   // Keep whatever queue the player is holding in step with what's loaded
@@ -79,7 +120,8 @@ export default function Music() {
   }, [items]);
 
   useEffect(() => {
-    // Drop anything still in the air for the previous term before asking again.
+    // Drop anything still in the air for the previous term — or the previous
+    // ordering — before asking again.
     reqToken.current++;
     setItems([]);
     setOffset(0);
@@ -87,7 +129,7 @@ export default function Music() {
     setLoading(false);
     fetchPage(0, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, term]);
+  }, [connected, term, sort, dir]);
 
   // Infinite scroll
   useEffect(() => {
@@ -125,6 +167,21 @@ export default function Music() {
   }, [music, inSync, exhausted, loading, offset, total, fetchPage]);
 
   const start = (index: number) => playMusic(items, index);
+
+  /**
+   * Pick a column, or reverse it if it's already the ordering. Re-sorting
+   * rebuilds the list from page 0 (see the effect above), which is the only
+   * honest thing to do: the phone owns the `ORDER BY`, so a new order makes
+   * every already-loaded row's position meaningless.
+   */
+  const chooseSort = (field: MusicSort) => {
+    if (field === sort) {
+      setDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSort(field);
+      setDir("asc");
+    }
+  };
 
   return (
     <div className="page">
@@ -178,10 +235,18 @@ export default function Music() {
           </div>
           <div className="track-head">
             <span>#</span>
-            <span>Title</span>
-            <span>Artist</span>
-            <span>Album</span>
-            <span>⏱</span>
+            <Th field="title" active={sort} dir={dir} onPick={chooseSort}>
+              Title
+            </Th>
+            <Th field="artist" active={sort} dir={dir} onPick={chooseSort}>
+              Artist
+            </Th>
+            <Th field="album" active={sort} dir={dir} onPick={chooseSort}>
+              Album
+            </Th>
+            <Th field="duration" active={sort} dir={dir} onPick={chooseSort}>
+              ⏱
+            </Th>
           </div>
           <div className="track-list">
             {items.map((m, i) => {
@@ -214,7 +279,8 @@ export default function Music() {
 
       <div className="page-foot">
         <span className="muted">
-          Songs download to <b>~/InterLink/Music</b> as you play them, then play from there.
+          Playback streams straight off the phone — nothing is copied into{" "}
+          <b>~/InterLink/Music</b>.
         </span>
       </div>
     </div>

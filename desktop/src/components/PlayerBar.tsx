@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MediaItem } from "../types";
 import { playMusic, setState, toast, useStore } from "../store";
-import { cachedPath, ensurePath, forgetPath } from "../musicCache";
+import { mediaStreamUrl } from "../api";
 
 function fmtTime(s: number) {
   if (!Number.isFinite(s) || s <= 0) return "0:00";
@@ -13,40 +12,32 @@ function fmtTime(s: number) {
 }
 
 /**
- * What the file is called once it lands on the laptop: `Artist - Title.ext`,
- * falling back to the phone's own filename. The composed half is not a
- * filename yet, so path separators and shell-hostile characters come out.
- */
-function suggestName(song: MediaItem): string {
-  const dot = song.name.lastIndexOf(".");
-  const ext = dot > 0 ? song.name.slice(dot) : "";
-  const fallback = dot > 0 ? song.name.slice(0, dot) : song.name;
-  const stem = [song.artist, song.title].filter(Boolean).join(" - ") || fallback;
-  const safe = stem
-    .replace(/[/\\:*?"<>|]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 120);
-  return `${safe || "track"}${ext}`;
-}
-
-/**
- * The always-on player: pulls a track off the phone over the link, then plays
- * the file that landed in `~/InterLink/Music`.
+ * The always-on player: streams a track straight off the phone and plays it.
  *
  * It lives at the app level rather than inside the Music page so that
  * browsing elsewhere — or going back to Messages mid-song — doesn't stop the
- * music. Downloading before playing (rather than streaming) is what the link
- * already does for video, and a 5 MB track crosses it fast enough that the
- * pause reads as buffering, not waiting.
+ * music.
+ *
+ * Playback asks the phone for a URL rather than for a file. The previous
+ * arrangement downloaded each track into `~/InterLink/Music` and then played
+ * it back through Tauri's `asset://` scheme, which had two problems: WebKitGTK
+ * rejects that scheme on media elements outright (`MEDIA_ERR_SRC_NOT_SUPPORTED`),
+ * so nothing played at all — and even had it worked, the first note would have
+ * waited on a 7 MB transfer. A plain HTTP URL with range support starts
+ * decoding from the first block, seeks with a `Range` header, and writes
+ * nothing to disk.
+ *
+ * The RPC that fetches the URL is a millisecond-scale round trip, not a
+ * download, so the `play()` that follows still sits inside the window of user
+ * activation WebKit requires — which is why autoplay is normally refused now
+ * only when the OS is being strict, not every time.
  */
 export default function PlayerBar() {
   const cmd = useStore((s) => s.music);
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  /** Bumped per load so a slow download can't overwrite a newer click. */
+  /** Bumped per load so a slow response can't overwrite a newer click. */
   const tokenRef = useRef(0);
-  const retriedRef = useRef<Set<string>>(new Set());
 
   const [queue, setQueue] = useState<MediaItem[]>([]);
   const [index, setIndex] = useState(-1);
@@ -57,7 +48,7 @@ export default function PlayerBar() {
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.9);
-  /** Non-fatal, shown in the bar: blocked autoplay, fetch failure, bad file. */
+  /** Non-fatal, shown in the bar: blocked autoplay, unreachable phone, bad file. */
   const [hint, setHint] = useState<string | null>(null);
 
   const song = index >= 0 ? queue[index] : undefined;
@@ -73,8 +64,8 @@ export default function PlayerBar() {
   const loadTrack = useCallback((s: MediaItem) => {
     const tok = ++tokenRef.current;
     // Stop what's playing now: the previous track would otherwise keep going
-    // for the whole of the next download, under a bar that already says
-    // something else.
+    // while the next one's URL is being resolved, under a bar that already
+    // says something else.
     audioRef.current?.pause();
     setPlaying(false);
     setProgress(0);
@@ -82,19 +73,20 @@ export default function PlayerBar() {
     setDuration((s.dur ?? 0) / 1000);
     setLoading(true);
     setHint(null);
-    ensurePath(s.id, suggestName(s))
-      .then((path) => {
+    mediaStreamUrl(s.id)
+      .then((url) => {
         if (tok !== tokenRef.current) return; // a newer click already won
-        setSrc(convertFileSrc(path));
-        // Bumped alongside `src` so replaying a track that is already local
-        // still reloads it — an unchanged src string would leave the element
-        // exactly where it was and the click would look dead.
+        setSrc(url);
+        // Bumped alongside `src` so replaying a track that is already
+        // buffered still reloads it — an unchanged src string would leave
+        // the element exactly where it was and the click would look dead.
         setNonce((n) => n + 1);
       })
       .catch((e) => {
         if (tok !== tokenRef.current) return;
+        console.error(`[music] could not get a stream url for ${s.id}: ${String(e)}`);
         setLoading(false);
-        setHint("Could not fetch this track from the phone");
+        setHint("Could not reach the phone");
         toast(String(e), "error");
       });
   }, []);
@@ -123,19 +115,13 @@ export default function PlayerBar() {
     a.load();
     a.play().then(
       () => setHint(null),
-      // WebKitGTK gates play() on a user gesture. The click that got us here
-      // was one, but the download that followed was async, so this can still
-      // be refused — say so rather than sitting there silently paused.
+      // WebKitGTK gates play() on a user gesture. Getting here is usually
+      // still inside one — resolving the URL is a round trip, not a download
+      // — but if the OS is strict about it, say so rather than sitting
+      // there silently paused.
       () => setHint("Press play to start"),
     );
   }, [src, nonce]);
-
-  // Queue the next track while the current one plays, so next/prev is instant.
-  useEffect(() => {
-    if (!playing) return;
-    const next = queue[index + 1];
-    if (next) ensurePath(next.id, suggestName(next)).catch(() => undefined);
-  }, [playing, index, queue]);
 
   // What the Music page highlights.
   useEffect(() => {
@@ -165,8 +151,8 @@ export default function PlayerBar() {
   const step = (delta: number) => {
     const i = index + delta;
     if (i < 0 || i >= queue.length) return;
-    // Same path as a click from the list: cache, fetch, errors all behave
-    // identically however a track was chosen.
+    // Same path as a click from the list: URL, errors and progress all
+    // behave identically however a track was chosen.
     playMusic(queue, i);
   };
 
@@ -179,14 +165,17 @@ export default function PlayerBar() {
 
   const onAudioError = () => {
     if (!src || !song) return;
-    // A cached path can outlive its file. Drop it and fetch once more; a
-    // second failure means the track itself is the problem, not the cache.
-    if (cachedPath(song.id) && !retriedRef.current.has(song.id)) {
-      retriedRef.current.add(song.id);
-      forgetPath(song.id);
-      loadTrack(song);
-      return;
-    }
+    // MediaError codes: 1 aborted, 2 network, 3 decode, 4 unsupported source.
+    // Worth logging because it is the one failure the bar cannot describe: a
+    // 2 means the phone stopped answering partway through, a 3 means the bytes
+    // arrived and the webview refused the codec, and neither reads differently
+    // on screen. Vite relays console.error into the dev log, so this is how
+    // the failure is told apart without a debugger attached to the webview.
+    const err = audioRef.current?.error;
+    console.error(
+      `[music] media error ${err?.code ?? "?"}: ${err?.message || "no message"}` +
+        ` (src=${src})`,
+    );
     setLoading(false);
     setPlaying(false);
     setHint("This track could not be played");
@@ -231,7 +220,7 @@ export default function PlayerBar() {
           </div>
           <div className="pb-sub">
             {loading
-              ? "Fetching from phone…"
+              ? "Buffering…"
               : hint ??
                 ([song.artist, song.album].filter(Boolean).join(" · ") || "Unknown artist")}
           </div>

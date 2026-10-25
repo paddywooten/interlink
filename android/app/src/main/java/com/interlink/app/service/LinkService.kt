@@ -32,6 +32,7 @@ import com.interlink.app.handlers.CallHandler
 import com.interlink.app.handlers.ContactsHandler
 import com.interlink.app.handlers.DeviceHandler
 import com.interlink.app.handlers.MediaHandler
+import com.interlink.app.handlers.MediaStream
 import com.interlink.app.handlers.SmsHandler
 import com.interlink.app.notif.LinkNotificationListener
 import com.interlink.app.notif.notifHistoryResponse
@@ -108,6 +109,10 @@ class LinkService : Service() {
         client = LinkClient(scope, prefs, ::dispatch, ::onState)
         callHandler = CallHandler(this, client)
         Bus.client = client
+        // Playback serves itself over HTTP (see MediaStream); open the port
+        // with the service rather than on first request, so the laptop's URL
+        // is never racing a socket that isn't up yet.
+        MediaStream.start(this)
         acquireKeepalive()
     }
 
@@ -124,6 +129,7 @@ class LinkService : Service() {
         releaseKeepalive()
         client.stop()
         scope.cancel()
+        MediaStream.stop()
         super.onDestroy()
     }
 
@@ -275,6 +281,7 @@ class LinkService : Service() {
                     respond(session, env, ContactsHandler.search(this, q, limit))
                 }
 
+                "media.stream" -> respond(session, env, MediaStream.info())
                 "media.list" -> respond(session, env, MediaHandler.list(this, env.d))
 
                 // thumb/get respond on the session themselves, then stream.

@@ -11,12 +11,28 @@
 //!   usb  — same, but report "no USB device" loudly in the UI
 //!   wifi — never tunnel (tear it down if it exists)
 //!
+//! There are two tunnels, running opposite ways:
+//!
+//!   `adb reverse <link port>`   — the phone dials the laptop's listener
+//!   `adb forward <media port>`  — the laptop dials the phone's listener
+//!
+//! The second exists because playback streams straight off the phone over
+//! HTTP (see `commands::media_stream_url`), which needs the *laptop* to be
+//! able to reach the *phone*. Over WiFi the phone's address is directly
+//! reachable so adb has nothing to do; over a cable only adb can make that
+//! hop.
+//!
 //! Transport display falls out of the same fact: a peer that arrives on
 //! loopback can only have come through our own tunnel (see `transport_of`).
 
 use crate::state::SharedState;
 use std::path::PathBuf;
 use std::process::Command;
+
+/// Where the phone's media server listens (MediaStream.kt binds this).
+/// Fixed rather than negotiated so a playback URL needs no discovery round
+/// trip — see PROTOCOL.md §7.
+pub const MEDIA_PORT: u16 = 27342;
 
 /// Locate the adb binary: $ADB → PATH → the well-known SDK locations.
 pub fn adb_path() -> Option<PathBuf> {
@@ -77,38 +93,50 @@ fn first_device(adb: &PathBuf) -> Option<String> {
     None
 }
 
-/// Reconcile the reverse tunnel with `mode`. Returns the adb serial seen, if
-/// any. Blocking — call from `spawn_blocking`.
+/// Reconcile the tunnels with `mode`. Returns the adb serial seen, if any.
+/// Blocking — call from `spawn_blocking`.
 pub fn apply(mode: &str, port: u16) -> Option<String> {
     let adb = adb_path()?;
     let serial = first_device(&adb)?;
+
+    let link = format!("tcp:{port}");
+    let media = format!("tcp:{MEDIA_PORT}");
+
     match mode {
         "wifi" => {
             // `--remove` errors when there is no tunnel; that's the point.
             let _ = Command::new(&adb)
-                .args(["-s", &serial, "reverse", "--remove", &format!("tcp:{port}")])
+                .args(["-s", &serial, "reverse", "--remove", &link])
+                .output();
+            let _ = Command::new(&adb)
+                .args(["-s", &serial, "forward", "--remove", &media])
                 .output();
         }
         _ => {
-            // Host and device ports match: the phone connects to
-            // 127.0.0.1:<port> and adb forwards to this laptop.
-            let spec = format!("tcp:{port}");
-            match Command::new(&adb)
-                .args(["-s", &serial, "reverse", &spec, &spec])
-                .output()
-            {
-                Ok(o) if o.status.success() => {
-                    log::debug!("adb reverse {spec} active for {serial}");
-                }
-                Ok(o) => log::warn!(
-                    "adb reverse {spec} failed: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                ),
-                Err(e) => log::warn!("adb reverse {spec} failed: {e}"),
-            }
+            // Link: host and device ports match, the phone dials 127.0.0.1
+            // and adb lands it on this laptop's listener.
+            tunnel(&adb, &serial, &["reverse", &link, &link]);
+            // Media: the other direction — the phone is listening now, so
+            // 127.0.0.1:MEDIA_PORT on this laptop reaches it.
+            tunnel(&adb, &serial, &["forward", &media, &media]);
         }
     }
     Some(serial)
+}
+
+/// One `adb -s <serial> …` invocation. Logs rather than fails: a tunnel that
+/// could not be set up is worth knowing about, but must not stop the serial
+/// from being published — the UI still needs to show the phone.
+fn tunnel(adb: &PathBuf, serial: &str, args: &[&str]) {
+    let label = args.join(" ");
+    match Command::new(adb).arg("-s").arg(serial).args(args).output() {
+        Ok(o) if o.status.success() => log::debug!("adb {label} active for {serial}"),
+        Ok(o) => log::warn!(
+            "adb {label} failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::warn!("adb {label} failed: {e}"),
+    }
 }
 
 /// One reconciliation pass: read the configured mode, run adb off the async

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import * as api from "../api";
 import type { MediaItem } from "../types";
 import { addRecentFile, toast, useStore } from "../store";
@@ -104,14 +103,12 @@ export default function Gallery() {
         setFullSrc(thumbs[item.id] ?? null);
       }
     } else if (item.mime.startsWith("video/")) {
-      // Pull the file down once, then play it from the asset URL — the
-      // webview can't stream over the link protocol, and a 200 MB base64
-      // blob would be much worse than a disk read.
+      // Ask for a URL rather than a file: the phone serves the bytes with
+      // range support, so a 200 MB video starts playing immediately and
+      // scrubbing is a request instead of a second copy on disk.
       setVideoLoading(true);
       try {
-        const r = await api.mediaDownload(item.id, item.name);
-        addRecentFile(item.name, r.path);
-        setVideoSrc(convertFileSrc(r.path));
+        setVideoSrc(await api.mediaStreamUrl(item.id));
       } catch (e) {
         toast(String(e), "error");
       } finally {

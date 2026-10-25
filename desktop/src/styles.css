@@ -1467,6 +1467,28 @@ nav {
   text-align: right;
 }
 
+/* Sort control living inside a header cell: it inherits the cell's type so
+   it doesn't disturb the uppercase tracking or the alignment above. */
+.th {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.th:hover {
+  color: var(--fg);
+}
+
+.th.on {
+  color: var(--accent);
+}
+
 .track {
   border-radius: 8px;
   cursor: pointer;

@@ -14,11 +14,14 @@ Two components, one encrypted protocol:
 - 💬 SMS threads — read & send texts from the laptop
 - 👥 Contacts — the whole address book on the laptop, searchable, tap to call
 - 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
-  thumbnails, and in-app video playback (download once, then play from disk)
+  thumbnails, and in-app video that streams straight off the phone, so
+  scrubbing works without waiting for a copy
 - 🎵 Music — the phone's whole song library, searchable by title, artist or
-  album, with an always-on player: queue, seek, next/prev and volume. Tracks
-  download to `~/InterLink/Music` as you play them and keep playing while you
-  browse the rest of the app
+  album and sortable by any of them, with an always-on player: queue, seek,
+  next/prev and volume. Songs stream from the phone over HTTP, so playback
+  starts at the first byte rather than after a full download, and nothing is
+  written to disk — the music keeps playing while you browse the rest of the
+  app
 - 📞 Phone calls — dial pad, answer/decline, and per-call audio routing: speak
   through any laptop mic (or the phone) and hear through any laptop output
   (laptop speakers, a Bluetooth speaker, HDMI — or the phone)

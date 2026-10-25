@@ -197,6 +197,77 @@ pub async fn media_download(
     result
 }
 
+/// A URL the webview can put straight into `<audio>` / `<video>` and play.
+///
+/// Playback used to mean "pull the whole file over, write it to disk, then
+/// play the copy" — `media_download` plus a `convertFileSrc` URL. Two things
+/// were wrong with that. WebKitGTK rejects Tauri's `asset://` scheme on media
+/// elements outright (`MEDIA_ERR_SRC_NOT_SUPPORTED`), so nothing played at
+/// all; and even had it worked, silence would last until a 7 MB file had
+/// crossed the link.
+///
+/// The phone serves the bytes itself now, with HTTP range support, so the
+/// webview decodes from the first block and seeking is one request instead of
+/// a re-download. Nothing is written to the laptop.
+///
+/// This only assembles the URL: the port is a fixed constant and the token
+/// arrives over the already-encrypted link, so a stale or spoofed URL simply
+/// gets a 401 from the phone.
+#[tauri::command]
+pub async fn media_stream_url(state: State<'_, SharedState>, id: String) -> Result<String, String> {
+    // Prefer the tunnel whenever one is configured — the cable reaches the
+    // phone even when the two sit on networks that cannot see each other,
+    // which is the usual USB case. Otherwise the phone's address is already
+    // known from the connection that just answered us.
+    let host = {
+        let inner = state.inner.lock().await;
+        if inner.adb_device.is_some() && inner.cfg.connection_mode() != "wifi" {
+            Some("127.0.0.1".to_string())
+        } else {
+            inner.conn.as_ref().map(|c| c.ip.clone())
+        }
+    };
+    let host = host.ok_or_else(|| "Phone is not reachable".to_string())?;
+    // An IPv6 literal needs brackets before it can carry a port.
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+
+    let info = state.request_json("media.stream", json!({})).await?;
+    let port = info["port"].as_u64().unwrap_or(crate::connection::MEDIA_PORT as u64);
+    let token = info["token"]
+        .as_str()
+        .ok_or_else(|| "internal: media stream token missing".to_string())?;
+
+    Ok(format!("http://{host}:{port}/m/{}?k={}", pct(&id), token))
+}
+
+/// Percent-encode for a URL path segment.
+///
+/// Ids look like `a:1000106750`, and a raw `:` in the first segment of a
+/// relative reference is the one character RFC 3986 treats specially — so
+/// encode everything outside the unreserved set rather than guess which
+/// characters the phone will still read back correctly.
+fn pct(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX[(b >> 4) as usize] as char);
+                out.push(HEX[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
 /// Start screen mirroring. The phone launches its MediaProjection consent
 /// dialog; on approval it streams JPEG frames as DATA frames on the fixed
 /// mirror tid, which server.rs forwards to the webview as `mirror.frame`
@@ -601,5 +672,56 @@ struct Opener;
 impl Opener {
     fn open_path(p: String) {
         let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pct;
+
+    /// The phone splits the path on `:` to work out which collection an id
+    /// names, so the separator has to survive the trip unchanged — and a raw
+    /// `:` is the one character RFC 3986 treats specially in a path segment.
+    #[test]
+    fn media_ids_encode_their_separator() {
+        assert_eq!(pct("a:1000106750"), "a%3A1000106750");
+        assert_eq!(pct("v:42"), "v%3A42");
+        assert_eq!(pct("i:0"), "i%3A0");
+    }
+
+    #[test]
+    fn unreserved_bytes_pass_through_and_everything_else_escapes() {
+        assert_eq!(pct("abcXYZ019-._~"), "abcXYZ019-._~");
+        // Query delimiters, the fragment marker, the space, and the `%` that
+        // would otherwise open a bogus escape of its own.
+        assert_eq!(pct("a&b=c d#e%f/g"), "a%26b%3Dc%20d%23e%25f%2Fg");
+    }
+
+    /// The phone decodes with a `%xx` → byte → UTF-8 reader; this mirrors it
+    /// so the two halves are checked against each other rather than each
+    /// against its own idea of the format.
+    #[test]
+    fn ids_round_trip_through_the_phones_decoder() {
+        for id in ["a:1", "v:9999999999", "i:0", "x:folder/name?&"] {
+            assert_eq!(decode(&pct(id)), id, "round trip of {id}");
+        }
+    }
+
+    fn decode(s: &str) -> String {
+        let mut out: Vec<u8> = Vec::with_capacity(s.len());
+        let b = s.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(v);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8(out).expect("decoded id is UTF-8")
     }
 }
