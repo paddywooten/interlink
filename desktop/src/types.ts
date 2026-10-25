@@ -106,6 +106,8 @@ export interface MediaItem {
   title?: string;
   artist?: string;
   album?: string;
+  /** Music only — present when the phone's row carries one (~70% do). */
+  genre?: string;
 }
 
 export interface CallState {

@@ -7,6 +7,23 @@ import { extendMusicQueue, playMusic, toast, useStore } from "../store";
 
 const PAGE = 60;
 
+/**
+ * Every ordering the phone honours for `type:"audio"`. The dropdown shows all
+ * of them because the table only has room for the columns people sort by
+ * most — filename, date and size are real `ORDER BY` keys on the phone with
+ * nothing to hang a header on here.
+ */
+const SORTS: { key: MusicSort; label: string }[] = [
+  { key: "title", label: "Title" },
+  { key: "artist", label: "Artist" },
+  { key: "album", label: "Album" },
+  { key: "genre", label: "Genre" },
+  { key: "name", label: "File name" },
+  { key: "duration", label: "Duration" },
+  { key: "date", label: "Date added" },
+  { key: "size", label: "File size" },
+];
+
 function fmtDur(ms?: number) {
   if (!ms || ms <= 0) return "–:––";
   const total = Math.round(ms / 1000);
@@ -169,10 +186,12 @@ export default function Music() {
   const start = (index: number) => playMusic(items, index);
 
   /**
-   * Pick a column, or reverse it if it's already the ordering. Re-sorting
-   * rebuilds the list from page 0 (see the effect above), which is the only
-   * honest thing to do: the phone owns the `ORDER BY`, so a new order makes
-   * every already-loaded row's position meaningless.
+   * Pick a column, or reverse it if it's already the ordering. Both the
+   * headers and the dropdown go through here, so the two controls cannot
+   * disagree about what the list is sorted by. Re-sorting rebuilds the list
+   * from page 0 (see the effect above), which is the only honest thing to do:
+   * the phone owns the `ORDER BY`, so a new order makes every already-loaded
+   * row's position meaningless.
    */
   const chooseSort = (field: MusicSort) => {
     if (field === sort) {
@@ -190,10 +209,31 @@ export default function Music() {
         <div className="row gap">
           <input
             className="music-search"
-            placeholder="Search title, artist or album…"
+            placeholder="Search title, artist, album or genre…"
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
+          <div className="sort-ctl" title="Sort the whole library on the phone">
+            <select
+              className="select"
+              aria-label="Sort by"
+              value={sort}
+              onChange={(e) => chooseSort(e.target.value as MusicSort)}
+            >
+              {SORTS.map((s) => (
+                <option key={s.key} value={s.key}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="btn"
+              onClick={() => setDir((d) => (d === "asc" ? "desc" : "asc"))}
+              title={`Direction: ${dir === "asc" ? "A → Z, low to high" : "Z → A, high to low"} — click to reverse`}
+            >
+              {dir === "asc" ? "▲ A→Z" : "▼ Z→A"}
+            </button>
+          </div>
           <button
             className="btn"
             disabled={!connected || items.length === 0}
@@ -244,6 +284,9 @@ export default function Music() {
             <Th field="album" active={sort} dir={dir} onPick={chooseSort}>
               Album
             </Th>
+            <Th field="genre" active={sort} dir={dir} onPick={chooseSort}>
+              Genre
+            </Th>
             <Th field="duration" active={sort} dir={dir} onPick={chooseSort}>
               ⏱
             </Th>
@@ -266,6 +309,9 @@ export default function Music() {
                   </span>
                   <span className="track-album" title={m.album}>
                     {m.album || "—"}
+                  </span>
+                  <span className="track-genre" title={m.genre}>
+                    {m.genre || "—"}
                   </span>
                   <span className="track-dur">{fmtDur(m.dur)}</span>
                 </div>

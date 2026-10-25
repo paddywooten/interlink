@@ -44,7 +44,15 @@ export const mediaDownload = (id: string, suggested?: string, subdir?: string) =
 /** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
  * the value lands in an SQL `ORDER BY`, so the phone only ever honours names
  * it recognises. */
-export type MusicSort = "title" | "artist" | "album" | "duration" | "date" | "name";
+export type MusicSort =
+  | "title"
+  | "artist"
+  | "album"
+  | "genre"
+  | "duration"
+  | "date"
+  | "name"
+  | "size";
 
 /**
  * A URL the webview can put straight into `<audio>` / `<video>` and play.

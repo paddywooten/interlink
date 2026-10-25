@@ -16,12 +16,13 @@ Two components, one encrypted protocol:
 - 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
   thumbnails, and in-app video that streams straight off the phone, so
   scrubbing works without waiting for a copy
-- 🎵 Music — the phone's whole song library, searchable by title, artist or
-  album and sortable by any of them, with an always-on player: queue, seek,
-  next/prev and volume. Songs stream from the phone over HTTP, so playback
-  starts at the first byte rather than after a full download, and nothing is
-  written to disk — the music keeps playing while you browse the rest of the
-  app
+- 🎵 Music — the phone's whole song library, searchable by title, artist,
+  album or genre and sortable by any of them (plus filename, date and size
+  from a dropdown), with an always-on player: queue, seek, next/prev, ±10 s,
+  repeat all/one, shuffle, and an A→B loop for a stretch you want played
+  over. Songs stream from the phone over HTTP, so playback starts at the
+  first byte rather than after a full download, and nothing is written to
+  disk — the music keeps playing while you browse the rest of the app
 - 📞 Phone calls — dial pad, answer/decline, and per-call audio routing: speak
   through any laptop mic (or the phone) and hear through any laptop output
   (laptop speakers, a Bluetooth speaker, HDMI — or the phone)

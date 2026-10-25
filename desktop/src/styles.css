@@ -322,6 +322,13 @@ nav {
   color: var(--fg);
 }
 
+/* A lit icon button: a mode that is on (repeat, shuffle, an A/B point set).
+   Declared after `:hover` so hovering an active toggle doesn't wash it out —
+   the two selectors have equal specificity, so source order decides. */
+.icon-btn.on {
+  color: var(--accent);
+}
+
 .input {
   background: var(--bg);
   border: 1px solid var(--line);
@@ -368,6 +375,13 @@ nav {
 .row {
   display: flex;
   align-items: center;
+}
+/* The page head carries search, sort and the play buttons on one line when
+   there is room, and lets them wrap when there isn't — otherwise the sort
+   control pushes the row straight off the right edge on a narrow window. */
+.page-head .row {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .row.gap {
@@ -1444,11 +1458,21 @@ nav {
 .music-search::placeholder {
   color: var(--fg2);
 }
+/** Sort field + direction, next to the search box. */
+.sort-ctl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sort-ctl .select {
+  max-width: 160px;
+  padding: 8px 8px;
+}
 
 .track-head,
 .track {
   display: grid;
-  grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 56px;
+  grid-template-columns: 40px minmax(0, 2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) minmax(0, 1fr) 56px;
   gap: 12px;
   align-items: center;
   padding: 8px 12px;
@@ -1601,7 +1625,40 @@ nav {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 6px;
+  /* Ten controls in one row only fits so far; below that they stack rather
+     than running off the edge of the bar. */
+  flex-wrap: wrap;
+}
+
+/* Repeat/shuffle sit slightly apart from the transport. */
+.pb-mode {
+  position: relative;
+}
+
+/* The "1" on repeat-one, tucked into the corner of the glyph. A dedicated
+   glyph (🔂) would read better but doesn't render on every font set. */
+.pb-one {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* The A⇄B link between the two loop-point buttons. Dim until both ends are
+   placed in the right order, lit once the loop is actually engaging. */
+.pb-ab {
+  color: var(--fg2);
+  font-size: 13px;
+  opacity: 0.35;
+  user-select: none;
+}
+
+.pb-ab.on {
+  color: var(--accent);
+  opacity: 1;
 }
 
 .pb-play {
