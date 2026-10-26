@@ -277,13 +277,37 @@ pub async fn mirror_start(
     state: State<'_, SharedState>,
     w: Option<u32>,
     fps: Option<u32>,
+    audio: Option<bool>,
 ) -> Result<Value, String> {
     let d = state
         .request_json(
             "mirror.start",
-            json!({ "w": w.unwrap_or(720), "fps": fps.unwrap_or(8) }),
+            json!({
+                "w": w.unwrap_or(720), "fps": fps.unwrap_or(8),
+                // The phone's own speaker keeps playing either way; this only
+                // decides whether what it plays is also relayed here.
+                "audio": audio.unwrap_or(true),
+            }),
         )
         .await?;
+    Ok(d)
+}
+
+/// Turn the phone's mirrored audio on or off while mirroring. The phone is
+/// the source of truth: it answers, then reports the real outcome (its
+/// capture rate, or why it can't) with a `mirror.audio` push that the server
+/// reacts to — see `audio::on_mirror_push`.
+#[tauri::command]
+pub async fn mirror_audio(
+    state: State<'_, SharedState>,
+    on: bool,
+) -> Result<Value, String> {
+    let d = state.request_json("mirror.audio", json!({ "on": on })).await?;
+    if !on {
+        // Don't wait for a push the phone may not bother sending: nothing is
+        // capturing now, so nothing may keep feeding the sink.
+        audio::stop_mirror(&state).await;
+    }
     Ok(d)
 }
 
@@ -294,6 +318,9 @@ pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String>
     // Stop painting regardless of what the phone replied: no frames are
     // coming, and a leftover sink would only hold a stale frame on screen.
     state.inner.lock().await.mirror_tx = None;
+    // Audio goes with the video — same reasoning, and the phone stops its
+    // capture on the same request whether or not it got to reply.
+    audio::stop_mirror(&state).await;
     res
 }
 
@@ -421,15 +448,29 @@ fn guess_mime(name: &str) -> String {
 }
 
 #[tauri::command]
-pub async fn list_audio_inputs() -> Result<Value, String> {
-    Ok(json!({ "devices": audio::list_inputs() }))
+pub async fn list_audio_inputs(state: State<'_, SharedState>) -> Result<Value, String> {
+    let saved = state.inner.lock().await.cfg.mic_device.clone();
+    Ok(json!({ "devices": with_saved(audio::list_inputs(), saved) }))
 }
 
 /// Output devices for the far end of a call (laptop speakers, Bluetooth
 /// speakers, HDMI, …) — the "Hear through" picker.
 #[tauri::command]
-pub async fn list_audio_outputs() -> Result<Value, String> {
-    Ok(json!({ "devices": audio::list_outputs() }))
+pub async fn list_audio_outputs(state: State<'_, SharedState>) -> Result<Value, String> {
+    let saved = state.inner.lock().await.cfg.speaker_device.clone();
+    Ok(json!({ "devices": with_saved(audio::list_outputs(), saved) }))
+}
+
+/// A saved device can predate the PipeWire picker (raw ALSA names were all
+/// cpal could offer). Keep it selectable rather than leaving the `<select>`
+/// pointing at an option that no longer exists.
+fn with_saved(mut devices: Vec<Value>, saved: Option<String>) -> Vec<Value> {
+    if let Some(saved) = saved.filter(|s| !s.is_empty()) {
+        if !devices.iter().any(|d| d["name"] == saved.as_str()) {
+            devices.insert(0, json!({ "name": saved, "label": saved, "default": false }));
+        }
+    }
+    devices
 }
 
 /// Start call audio relay for an active call (negotiates with the phone).
@@ -471,9 +512,21 @@ pub async fn call_audio_start(
         // Nothing to relay: the phone handles both directions itself.
         return Ok(json!({ "ok": true, "mode": "phone" }));
     }
+    // Keep for routing after the streams are up (start consumes the values).
+    let (mic_route, spk_route) = (mic.clone(), speaker.clone());
     match audio::start_negotiated(&state, &call_id, mic, speaker, uplink, downlink).await {
         Ok(handle) => {
             state.inner.lock().await.call_audio = Some(handle);
+            // Honour a *picked* PipeWire node (Bluetooth, HDMI, …). cpal can
+            // only address ALSA devices, so the stream opens on the system
+            // default and is relinked here — stream-scoped, so the default
+            // and every other app stay where they are.
+            if downlink {
+                audio::route_async(audio::Track::Playback, spk_route.as_deref());
+            }
+            if uplink {
+                audio::route_async(audio::Track::Capture, mic_route.as_deref());
+            }
             Ok(json!({
                 "ok": true,
                 "mode": if uplink && downlink { "relay" } else if downlink { "hear_laptop" } else { "speak_laptop" },

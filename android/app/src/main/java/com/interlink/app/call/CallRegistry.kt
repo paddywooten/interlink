@@ -3,6 +3,8 @@ package com.interlink.app.call
 import android.net.Uri
 import android.provider.ContactsContract
 import android.telecom.Call
+import android.telecom.CallAudioState
+import android.telecom.InCallService
 import android.util.Log
 import com.interlink.app.core.objOf
 import kotlinx.serialization.json.JsonElement
@@ -34,6 +36,54 @@ object CallRegistry {
 
     @Volatile
     var activeSince: Long = 0L
+
+    /** The bound InCallService. Steering the call's audio route is an
+     *  *InCallService* API, not a `Call` one, so handlers need this handle. */
+    @Volatile
+    var service: InCallService? = null
+
+    /** The route in use before [leaveLoudspeaker] moved it; 0 = we moved
+     *  nothing, so there is nothing to put back. */
+    @Volatile
+    private var savedRoute: Int = 0
+
+    /**
+     * Take the handset's own call audio off the loudspeaker while the far end
+     * is being relayed to the laptop. The user asked to hear the call *there*,
+     * and two copies of the same voice arriving at different delays is worse
+     * than one.
+     *
+     * Off the loudspeaker rather than muted outright: until the relay has
+     * proven it is carrying something real, this keeps the call answerable by
+     * putting the phone to an ear. [restoreLoudspeaker] puts back exactly what
+     * was chosen before.
+     */
+    @Suppress("DEPRECATION")
+    fun leaveLoudspeaker() {
+        if (savedRoute != 0) return
+        val svc = service ?: return
+        val route = runCatching { svc.callAudioState?.route }.getOrNull() ?: return
+        if (route and CallAudioState.ROUTE_SPEAKER == 0) return // already off it
+        savedRoute = route
+        if (runCatching { svc.setAudioRoute(CallAudioState.ROUTE_EARPIECE) }.isFailure) {
+            savedRoute = 0
+            return
+        }
+        log("call audio: handset moved off the loudspeaker (was route=$route)")
+    }
+
+    /** Put the handset back where it was; a no-op when nothing was moved. */
+    @Suppress("DEPRECATION")
+    fun restoreLoudspeaker() {
+        val route = savedRoute
+        if (route == 0) return
+        savedRoute = 0
+        val svc = service
+        if (svc == null) return
+        if (runCatching { svc.setAudioRoute(route) }.isSuccess) {
+            log("call audio: handset route restored to $route")
+        }
+    }
 
     fun newCallId(): String = "c" + System.currentTimeMillis().toString(36)
 

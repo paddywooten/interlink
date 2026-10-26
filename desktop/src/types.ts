@@ -92,6 +92,29 @@ export interface Contact {
   phones: string[];
 }
 
+/** One row of the phone's call history (`calllog.list`). */
+export interface CallEntry {
+  id: string;
+  number: string;
+  name: string;
+  kind: CallKind;
+  /** epoch ms */
+  date: number;
+  /** seconds */
+  duration: number;
+  new: boolean;
+}
+
+export type CallKind =
+  | "in"
+  | "out"
+  | "missed"
+  | "voicemail"
+  | "rejected"
+  | "blocked"
+  | "answered"
+  | "unknown";
+
 export interface MediaItem {
   id: string;
   name: string;
@@ -111,12 +134,22 @@ export interface MediaItem {
 }
 
 export interface CallState {
-  state: "incoming" | "active" | "ended";
+  state: "incoming" | "dialing" | "active" | "ended";
   dir: "in" | "out";
   number: string;
   name?: string;
   callId: string;
   duration?: number;
+}
+
+/** An audio device the laptop can actually route a call to. */
+export interface AudioDevice {
+  /** Node name — what gets saved and passed back to the backend. */
+  name: string;
+  /** The name PipeWire publishes ("Built-in Audio Analog Stereo"). */
+  label?: string;
+  /** True for the node new streams land on when nothing is chosen. */
+  default?: boolean;
 }
 
 export interface Transfer {

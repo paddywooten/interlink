@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AudioDevice,
+  CallEntry,
   CallState,
   Contact,
   MediaItem,
@@ -18,7 +20,7 @@ export const getPairingQr = (rotate = false) =>
   invoke<{ qr: string; rotated: boolean }>("get_pairing_qr", { rotate });
 export const unpair = () => invoke("unpair");
 export const listAudioInputs = () =>
-  invoke<{ devices: { name: string; default: boolean }[] }>("list_audio_inputs");
+  invoke<{ devices: AudioDevice[] }>("list_audio_inputs");
 export const getSettings = () => invoke<Record<string, unknown>>("get_settings");
 export const getDevices = () =>
   invoke<{ devices: SeenDevice[] }>("get_devices").then((r) => r.devices);
@@ -66,10 +68,17 @@ export type MusicSort =
 export const mediaStreamUrl = (id: string) => invoke<string>("media_stream_url", { id });
 /** Kick off screen mirroring: the phone shows its MediaProjection consent
  * dialog, then streams `mirror.frame` pushes and reports lifecycle via
- * `mirror.state` pushes. */
-export const mirrorStart = (w = 720, fps = 8) =>
-  invoke<{ status: string }>("mirror_start", { w, fps });
+ * `mirror.state` pushes. `audio` relays what the phone is playing to the
+ * laptop as well — see `mirrorAudio`. */
+export const mirrorStart = (w = 720, fps = 8, audio = true) =>
+  invoke<{ status: string }>("mirror_start", { w, fps, audio });
 export const mirrorStop = () => invoke<{ ok: boolean }>("mirror_stop");
+/** Turn the phone's mirrored audio on/off while mirroring. The phone's
+ * answer is only an acknowledgement — whether sound actually flows arrives
+ * as a `mirror.audio` push carrying its capture rate (or the reason it
+ * can't), which the server turns into the laptop's speaker relay. */
+export const mirrorAudio = (on: boolean) =>
+  invoke<{ ok: boolean; started?: boolean }>("mirror_audio", { on });
 /** `dest:"media"` puts the file straight into the phone's photo/video
  * library instead of Downloads/InterLink. Resolves once the phone confirms
  * it finished writing. */
@@ -79,7 +88,7 @@ export const fileSend = (path: string, dest?: string) =>
     { path, dest },
   );
 export const listAudioOutputs = () =>
-  invoke<{ devices: { name: string; default: boolean }[] }>("list_audio_outputs");
+  invoke<{ devices: AudioDevice[] }>("list_audio_outputs");
 /** Start the call audio relay. `uplink` = speak through the laptop,
  * `downlink` = hear through the laptop; both false keeps the call on the
  * phone. `PHONE` device values are handled by the caller. */
@@ -155,6 +164,11 @@ export const smsSend = (args: { address?: string; threadId?: string; body: strin
 export const smsRead = (threadId: string) => req("sms.read", { threadId }).catch(() => undefined);
 export const contactsQuery = (q?: string, limit = 30) =>
   req<{ contacts: Contact[] }>("contacts.query", { q, limit }).then((r) => r.contacts);
+/** The phone's call history, newest first. `READ_CALL_LOG` is its own
+ * permission over there, so a refusal arrives as a `perm:` error — show it
+ * as an instruction, not as an empty list. */
+export const callLogList = (limit = 100) =>
+  req<{ calls: CallEntry[] }>("calllog.list", { limit }).then((r) => r.calls);
 export const notifHistory = (limit = 100) =>
   req<{ items: NotifItem[] }>("notif.history", { limit }).then((r) => r.items ?? []);
 export const notifAction = (key: string, token: string, reply?: string) =>
@@ -176,7 +190,9 @@ export const mediaList = (
     sort,
     dir,
   });
-export const callDial = (number: string) => req<{ callId: string }>("call.dial", { number });
+/** The phone reports what it knows: an id, and how it resolved the number. */
+export const callDial = (number: string) =>
+  req<{ callId: string; number?: string; name?: string }>("call.dial", { number });
 export const callAnswer = (callId: string) => req("call.answer", { callId }).catch(() => undefined);
 export const callDecline = (callId: string) => req("call.decline", { callId }).catch(() => undefined);
 export const callEnd = (callId: string) => req("call.end", { callId }).catch(() => undefined);

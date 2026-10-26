@@ -13,6 +13,7 @@ import Calls from "./pages/Calls";
 import Mirror from "./pages/Mirror";
 import Settings from "./pages/Settings";
 import PlayerBar from "./components/PlayerBar";
+import CallBar from "./components/CallBar";
 import QrModal from "./components/QrModal";
 import {
   addNotification,
@@ -33,6 +34,9 @@ export default function App() {
   // Truthy once a queue exists — full-height pages need to make room for the
   // player bar rather than let it sit on top of their composer.
   const music = useStore((s) => s.music !== null);
+  // Same for the in-call bar, which stands down on Calls (the page's own
+  // call card already carries these controls).
+  const inCall = useStore((s) => s.call !== null && s.page !== "calls");
 
   // Initial status + event stream
   useEffect(() => {
@@ -166,6 +170,11 @@ export default function App() {
           case "mirror.state":
             window.dispatchEvent(new CustomEvent("il:mirror-state", { detail: d }));
             break;
+          case "mirror.audio":
+            // Audio started (rate) or stopped/failed (reason) on the phone —
+            // the server reacts by itself; this is for the Mirror page UI.
+            window.dispatchEvent(new CustomEvent("il:mirror-audio", { detail: d }));
+            break;
           case "unpair":
             refresh();
             toast("Phone unpaired", "info");
@@ -220,7 +229,11 @@ export default function App() {
   return (
     <div className="app">
       <Sidebar />
-      <main className={`main ${connected ? "" : "offline"} ${music ? "has-player" : ""}`}>
+      <main
+        className={`main ${connected ? "" : "offline"} ${music ? "has-player" : ""} ${
+          inCall ? "has-call" : ""
+        }`}
+      >
         {!connected && status?.paired && (
           <div className="offline-banner">
             <span className="dot" /> Phone disconnected — waiting for it to reconnect…
@@ -229,6 +242,8 @@ export default function App() {
         {pageEl}
         {/* Outside the switch so browsing away mid-track doesn't stop it. */}
         <PlayerBar />
+        {/* Same reason: an active call must not depend on which page is open. */}
+        <CallBar />
       </main>
       <Toasts />
       <QrModal />

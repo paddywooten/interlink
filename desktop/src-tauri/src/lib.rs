@@ -90,6 +90,7 @@ pub fn run() {
             commands::file_send,
             commands::mirror_start,
             commands::mirror_stop,
+            commands::mirror_audio,
             commands::list_audio_inputs,
             commands::list_audio_outputs,
             commands::call_audio_start,

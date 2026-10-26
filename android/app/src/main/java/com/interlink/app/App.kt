@@ -11,9 +11,6 @@ import com.interlink.app.notif.LinkNotificationListener
 
 /** Creates notification channels and starts background LAN device discovery. */
 class App : Application() {
-    companion object {
-        const val CHANNEL_LINK = "interlink_link"
-    }
 
     override fun onCreate() {
         super.onCreate()
@@ -33,12 +30,27 @@ class App : Application() {
 
         // A listener can be enabled in settings yet never bound — after an app
         // update, or if the app had been force-stopped — and when that happens
-        // *nothing* mirrors, with no error anywhere. Give the system a moment
-        // to bind on its own, then ask it to if it hasn't; the check is a
-        // no-op once we are connected or if mirroring was never enabled.
-        Handler(Looper.getMainLooper()).postDelayed(
-            { LinkNotificationListener.requestRebindIfStale(this) },
-            5_000,
-        )
+        // *nothing* mirrors, with no error anywhere. Today's APK reinstall did
+        // exactly that: the toggle was still ticked, and not one notification
+        // reached the laptop until the system was told a second time. One
+        // attempt is the thing that gets lost, so keep asking while we are
+        // still unbound. No-op once connected, or if mirroring was never
+        // enabled.
+        val main = Handler(Looper.getMainLooper())
+        val rebind = object : Runnable {
+            override fun run() {
+                LinkNotificationListener.requestRebindIfStale(this@App)
+                main.postDelayed(this, REBIND_RETRY_MS)
+            }
+        }
+        main.postDelayed(rebind, 5_000)
+    }
+
+    companion object {
+        const val CHANNEL_LINK = "interlink_link"
+
+        /** How often to re-ask the system to bind the notification listener
+         *  while it remains enabled-but-unbound. */
+        private const val REBIND_RETRY_MS = 60_000L
     }
 }

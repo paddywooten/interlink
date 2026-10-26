@@ -207,16 +207,17 @@ a stalled sender cannot wedge a collector forever.
 
 | type | dir | payload `d` |
 |---|---|---|
-| `call.state` | P→L | `{state:"incoming"\|"active"\|"ended", dir:"in"\|"out", number, name?, callId, duration?}` |
+| `call.state` | P→L | `{state:"incoming"\|"dialing"\|"active"\|"ended", dir:"in"\|"out", number, name?, callId, duration?}` |
 | `call.incoming` | P→L | same payload as `call.state` — compatibility alias the phone pushes **alongside** `call.state`; laptops key off `call.state` |
 | `call.answer` | L→P | `{callId}` |
 | `call.decline` | L→P | `{callId}` |
 | `call.end` | L→P | `{callId}` |
-| `call.dial` | L→P | `{number}` → `{callId}` |
+| `call.dial` | L→P | `{number}` → `{callId, number, name}` (the number as dialled, `name` resolved from the address book or `""`) |
 | `call.audio_start` | L→P | `{callId, codec:"pcm_s16le", rate:16000, ch:1, frameMs:20, uplink:true, downlink:true}` — the two booleans are independent (see below) |
 | `call.audio_stop` | L→P | `{callId}` |
 | `call.audio` | ↔ | kind `0x02` frames, `tid` = callId hash(16B), `seq` = frame #, payload = PCM S16LE 20 ms (6400 B). Phone → laptop = far end (only when `downlink`); laptop → phone = mic (only when `uplink`). |
 | `call.audio_state` | P→L | `{callId, ok, reason?}` — `ok:false` with `reason:"mic_permission"\|"capture_blocked"\|"no_call"` ⇒ fallback: audio stays on phone |
+| `calllog.list` | LR | `{limit? ≤ 500}` → `{calls:[{id, number, name, kind, date, duration, new}]}` — the phone's history, **newest first**. `date` is epoch **ms**, `duration` whole **seconds** (what the provider stores), `kind` ∈ `in`\|`out`\|`missed`\|`voicemail`\|`rejected`\|`blocked`\|`answered`\|`unknown` (Android's `CallLog` types, mapped on the phone so the wire never carries an OEM's extra constant). Names are resolved on the phone from the address book, falling back to the dialer's `CACHED_NAME`, so the laptop never has to join numbers against its own copy |
 
 **Both directions are independently steerable.** `uplink` (speak through the
 laptop) and `downlink` (hear through the laptop) are separate flags so the user
@@ -234,11 +235,26 @@ The device *lists* (which laptop mic / output to use) never cross the wire: the
 phone only ever learns the two booleans. Each side resolves its own device from
 its own config.
 
+**A call is on screen before Telecom reports anything.** `call.dial`'s response
+is what puts it there: the laptop renders the call (and with it the end-call
+control) the moment the phone accepts the request, rather than waiting for the
+first `call.state`. The phone then pushes `dialing` for an outgoing call — from
+`onCallAdded` as well as `STATE_DIALING`, so a call that never reaches
+`active` is never invisible — then `incoming`/`active`, and `ended` on
+disconnect. Nothing in the lifecycle depends on the laptop polling.
+
 Audio relay capability is **negotiated**: the phone answers the `call.audio_start`
 request itself, then pushes `call.audio_state` once capture actually starts or is
 blocked. Laptop UI shows phone-speaker fallback when not ok.
 (Cellular call audio capture is OEM-restricted; on failure the call still works
 as remote control + phone speaker.)
+
+Reading the history (`calllog.list`) needs **its own** runtime permission:
+`CALL_PHONE` allows placing a call and `ANSWER_PHONE_CALLS` allows answering
+one, and neither says anything about being allowed to read who called whom.
+The phone therefore answers with a `perm:` error rather than an empty list —
+"nobody called" and "you haven't allowed this" must never look the same, or
+the laptop's call page silently becomes useless and nobody knows why.
 
 ### 4.7 Utilities
 
@@ -258,8 +274,10 @@ as remote control + phone speaker.)
 
 | type | dir | payload `d` |
 |---|---|---|
-| `mirror.start` | L→P | `{w?:720, fps?:8}` → `{status:"consent_required"}`. Phone launches the MediaProjection consent dialog; frames only flow after the user approves. |
+| `mirror.start` | L→P | `{w?:720, fps?:8, audio?:true}` → `{status:"consent_required"}`. Phone launches the MediaProjection consent dialog; frames only flow after the user approves. `audio` asks for the phone's playback sound to be relayed too. |
 | `mirror.stop` | L→P | `{}` → `{ok:true}` |
+| `mirror.audio` | L→P | `{on:true\|false}` → `{ok:true, started, armed?}` — turn the mirrored audio on or off while mirroring. `started` means the capture loop is running now; `armed` means there is no projection yet, so the request is recorded and honoured the moment consent produces one. A handset that can't do it answers `ok:false` with a `perm:`/`internal:` reason instead. |
+| `mirror.audio` | P→L push | `{ok:true, rate, ch:1, frameMs:20}` once capture is really recording — `rate` is what the handset's mix accepted (48 kHz first, falling back to 44.1 then 16 kHz) — or `{ok:false, reason}` when it stops or never started. |
 | `mirror.state` | P→L push | `{active:true, pending?}` when consent granted / starting; `{active:false, reason?:"denied"}` on stop or denial |
 | `mirror.frame` | P→L push | `{seq, mime:"image/jpeg", data}` — STANDARD base64 JPEG, one complete frame per push. Desktop routes fixed-tid kind-`0x02` frames here. |
 
@@ -270,6 +288,34 @@ complete JPEG (`seq` = frame counter, no chunking/reassembly); the desktop
 intercepts this tid in its data-collector router and re-emits as the
 `mirror.frame` push above. Base64 is STANDARD — `data:` URLs reject the
 URL-safe alphabet.
+
+**Audio is a second stream on a second tid**: `sha256("interlink-mirror-audio-v1")[..16]`
+(`crypto::mirror_audio_tid()` / `ScreenMirrorService.MIRROR_AUDIO_TID`), PCM
+S16LE mono, one 20 ms frame per chunk — the same wire shape as call audio
+(§4.6), but fixed-rate and strictly phone → laptop. The capture is
+`AudioPlaybackCaptureConfiguration` (Android 10+, needs `RECORD_AUDIO`, never
+the microphone): the phone records **what other apps are playing**, not what
+the room hears, and only the usages the projection admits — media, games, and
+untagged audio; assistants and calls stay private by Android's own rule.
+Those frames are *not* intercepted: they land in the ordinary data-collector
+router under a collector the laptop's relay registered, so they die with it.
+
+Ordering is what makes the rate trustworthy. The phone pushes
+`mirror.audio {ok:true, rate}` **before** its first frame, and push and data
+share one ordered link, so the laptop has its resampler built for that rate
+by the time PCM arrives — no frame is ever played at the wrong pitch. The
+rate itself is negotiated with the handset's mixer rather than assumed (48
+kHz, then 44.1, then 16), because a capture rate the mix doesn't run at
+simply fails to initialise.
+
+On the laptop the PCM is converted to f32 and fed to a ring that the output
+callback drains at the device's own rate — the same linear-resample-on-pull
+path call audio uses. The phone's own speaker is **not** muted: the handset
+keeps playing what it plays, which is what leaves it usable as a phone while
+mirrored. Anything that ends the relay — `mirror.audio {on:false}`,
+`mirror.stop`, `mirror.state {active:false}`, or the link dropping — tears
+the laptop's stream down with it, because a collector with no producer is
+just an open audio device playing silence.
 
 **Delivery is latest-frame-wins, not queued, at both ends.** The phone keeps
 capturing whether or not the laptop has painted the previous frame, so any

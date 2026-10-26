@@ -239,6 +239,11 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
         BatteryRow(context, tick)
         RuntimeRow(context, tick, multiLauncher, "Phone / calls",
             arrayOf(Manifest.permission.READ_PHONE_STATE, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS))
+        // Separate from "Phone / calls" on purpose: dialling and answering are
+        // not a licence to read history, and saying so in its own row is the
+        // only way the user learns why the laptop's call list is empty.
+        RuntimeRow(context, tick, multiLauncher, "Call log (recent calls on laptop)",
+            arrayOf(Manifest.permission.READ_CALL_LOG))
         RuntimeRow(context, tick, multiLauncher, "Microphone (call audio)",
             arrayOf(Manifest.permission.RECORD_AUDIO))
         RuntimeRow(context, tick, multiLauncher, "Media (photos, videos & music)",

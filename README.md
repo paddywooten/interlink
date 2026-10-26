@@ -24,9 +24,17 @@ Two components, one encrypted protocol:
   first byte rather than after a full download, and nothing is written to
   disk — the music keeps playing while you browse the rest of the app
 - 📞 Phone calls — dial pad, answer/decline, and per-call audio routing: speak
-  through any laptop mic (or the phone) and hear through any laptop output
-  (laptop speakers, a Bluetooth speaker, HDMI — or the phone)
-- 📱 Screen mirroring — live phone screen on the laptop (MediaProjection, user-approved)
+  and hear through the phone's own microphone/speaker, the laptop's, or any
+  device the laptop has connected. The device list is read from PipeWire, so a
+  Bluetooth headset shows up under its real name (cpal only sees ALSA
+  pseudo-devices, where Bluetooth doesn't exist at all), and picking one moves
+  only this call's stream — the system default and every other app stay put.
+  The call, with its end-call button, follows you between pages instead of
+  living only on the Calls page, which also carries the phone's recent-call
+  history with a missed-calls filter and tap-to-redial
+- 📱 Screen mirroring — live phone screen *and its sound* on the laptop
+  (MediaProjection, user-approved; what the phone is playing is captured and
+  comes out of the laptop speakers, with a toggle to leave it on the phone)
 - 📋 Clipboard sharing (both directions)
 - 🔌 USB or WiFi — plug the phone in and the link rides the cable through an
   `adb reverse` tunnel; unplug and it falls back to WiFi. No shared network needed.

@@ -24,14 +24,20 @@ class LinkInCallService : InCallService() {
         }
     }
 
+    override fun onCreate() {
+        super.onCreate()
+        CallRegistry.service = this
+    }
+
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
         val id = CallRegistry.attach(call)
         call.registerCallback(callback)
         CallRegistry.log("call added id=$id state=${call.state}")
-        if (call.state == Call.STATE_RINGING) {
-            emit("incoming", call, id)
-        }
+        // Not only RINGING: an outgoing call arrives already DIALING, and that
+        // is the moment the laptop needs to know a call is under way — it is
+        // what puts the end-call control on screen while the far end rings.
+        handleState(call, call.state)
     }
 
     override fun onCallRemoved(call: Call) {
@@ -45,13 +51,26 @@ class LinkInCallService : InCallService() {
         if (id != null) {
             pushBoth(CallRegistry.statePayload("ended", id, number, null, duration))
         }
+        // The relay may have been cut short (link drop) rather than stopped
+        // cleanly — clear the route we moved so the next call starts where the
+        // user expects.
+        CallRegistry.restoreLoudspeaker()
         CallRegistry.log("call removed id=$id")
+    }
+
+    override fun onDestroy() {
+        CallRegistry.restoreLoudspeaker()
+        CallRegistry.service = null
+        super.onDestroy()
     }
 
     private fun handleState(call: Call, state: Int) {
         val id = CallRegistry.currentCallId ?: return
         when (state) {
             Call.STATE_RINGING -> emit("incoming", call, id)
+            // Outgoing: dialling is the state we spend the longest in, and the
+            // one the laptop must show an end-call button for.
+            Call.STATE_DIALING -> emit("dialing", call, id)
             Call.STATE_ACTIVE -> {
                 CallRegistry.activeSince = SystemClock.elapsedRealtime()
                 emit("active", call, id)

@@ -168,6 +168,14 @@ pub fn mirror_tid() -> [u8; 16] {
     tid_from_str("interlink-mirror-v1")
 }
 
+/// Fixed transfer id for the mirror's *audio* frames (the phone's playback
+/// capture, relayed to the laptop speakers). Separate from [mirror_tid] so
+/// PCM and JPEG never share a router branch. Must match the phone's
+/// `ScreenMirrorService.MIRROR_AUDIO_TID = Crypto.tidFromString("interlink-mirror-audio-v1")`.
+pub fn mirror_audio_tid() -> [u8; 16] {
+    tid_from_str("interlink-mirror-audio-v1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,5 +211,19 @@ mod tests {
 
     fn crypto_mirror_tid_reference() -> [u8; 16] {
         tid_from_str("interlink-mirror-v1")
+    }
+
+    /// Same pin for the audio tid: a one-sided change would leave PCM frames
+    /// landing in the generic collector router with no collector, i.e. silent.
+    #[test]
+    fn mirror_audio_tid_is_sha256_prefix_of_protocol_constant() {
+        use sha2::Digest;
+        let full = Sha256::digest(b"interlink-mirror-audio-v1");
+        let mut expected = [0u8; 16];
+        expected.copy_from_slice(&full[..16]);
+        assert_eq!(mirror_audio_tid(), expected);
+        assert_eq!(&mirror_audio_tid()[..], &full[..16]);
+        // Must not collide with the video tid — the routers key on equality.
+        assert_ne!(mirror_audio_tid(), mirror_tid());
     }
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import * as api from "../api";
 import { setState, toast, useStore } from "../store";
+import type { AudioDevice } from "../types";
 
 const CONN_MODES = [
   {
@@ -24,8 +25,8 @@ export default function Settings() {
   const status = useStore((s) => s.status);
   const connected = useStore((s) => s.connected);
   const [name, setName] = useState("");
-  const [mics, setMics] = useState<{ name: string; default: boolean }[]>([]);
-  const [spks, setSpks] = useState<{ name: string; default: boolean }[]>([]);
+  const [mics, setMics] = useState<AudioDevice[]>([]);
+  const [spks, setSpks] = useState<AudioDevice[]>([]);
   const [phoneInfo, setPhoneInfo] = useState<Record<string, unknown> | null>(null);
   const [connMode, setConnMode] = useState("auto");
 
@@ -273,7 +274,7 @@ export default function Settings() {
               <option value="">System default</option>
               {mics.map((m) => (
                 <option key={m.name} value={m.name}>
-                  {m.name}
+                  {m.label ?? m.name}
                   {m.default ? " (default)" : ""}
                 </option>
               ))}
@@ -296,7 +297,7 @@ export default function Settings() {
               <option value="">System default</option>
               {spks.map((s) => (
                 <option key={s.name} value={s.name}>
-                  {s.name}
+                  {s.label ?? s.name}
                   {s.default ? " (default)" : ""}
                 </option>
               ))}

@@ -31,8 +31,9 @@ pub async fn maybe_show(state: &SharedState, app: &AppHandle, t: &str, d: &Value
             (title.to_string(), body.to_string())
         }
         // Only the transition into ringing — state echoes for `active`/`ended`
-        // must not re-pop the same call.
-        "call.state" if d["state"].as_str() == Some("ringing") => {
+        // must not re-pop the same call. The phone pushes "incoming" for that
+        // transition (it pushes "dialing" only for calls the laptop placed).
+        "call.state" if d["state"].as_str() == Some("incoming") => {
             let from = d["name"]
                 .as_str()
                 .or_else(|| d["number"].as_str())

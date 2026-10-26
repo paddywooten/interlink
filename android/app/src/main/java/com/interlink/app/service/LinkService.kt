@@ -23,12 +23,14 @@ import com.interlink.app.core.LinkClient
 import com.interlink.app.core.LinkSession
 import com.interlink.app.core.LinkState
 import com.interlink.app.core.Prefs
+import com.interlink.app.core.bool
 import com.interlink.app.core.int
 import com.interlink.app.core.objOf
 import com.interlink.app.core.str
 import com.interlink.app.handlers.AppHandler
 import com.interlink.app.handlers.BackupHandler
 import com.interlink.app.handlers.CallHandler
+import com.interlink.app.handlers.CallLogHandler
 import com.interlink.app.handlers.ContactsHandler
 import com.interlink.app.handlers.DeviceHandler
 import com.interlink.app.handlers.MediaHandler
@@ -281,6 +283,14 @@ class LinkService : Service() {
                     respond(session, env, ContactsHandler.search(this, q, limit))
                 }
 
+                // Call history for the Calls page. Its own permission, checked
+                // inside the handler so a denial reaches the laptop as a
+                // `perm:` error instead of a silently empty list.
+                "calllog.list" -> {
+                    val limit = (env.d.int("limit") ?: 100).coerceIn(1, 500)
+                    respond(session, env, CallLogHandler.list(this, limit))
+                }
+
                 "media.stream" -> respond(session, env, MediaStream.info())
                 "media.list" -> respond(session, env, MediaHandler.list(this, env.d))
 
@@ -316,6 +326,11 @@ class LinkService : Service() {
                 "mirror.start" -> {
                     val w = env.d.int("w") ?: 720
                     val f = env.d.int("fps") ?: 8
+                    val a = env.d.bool("audio") ?: true
+                    // Stash the audio preference before the service exists:
+                    // consent is asynchronous, and this is the only message
+                    // that carries it. The service reads it on capture start.
+                    com.interlink.app.mirror.ScreenMirrorService.preferAudio(a)
                     val i = Intent(this, com.interlink.app.mirror.ProjectionActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         .putExtra(com.interlink.app.mirror.ScreenMirrorService.EXTRA_WIDTH, w)
@@ -328,6 +343,16 @@ class LinkService : Service() {
                     com.interlink.app.mirror.ScreenMirrorService.stop(this)
                     respond(session, env, objOf("ok" to true))
                 }
+
+                // Playback audio on/off while mirroring. The phone answers
+                // straight away and reports the *outcome* (its capture rate,
+                // or the reason it can't) with a mirror.audio push once the
+                // capture actually exists.
+                "mirror.audio" ->
+                    respond(
+                        session, env,
+                        com.interlink.app.mirror.ScreenMirrorService.setAudio(env.d.bool("on") ?: false),
+                    )
 
                 "device.info" -> {
                     val name = prefs.snapshot().deviceName

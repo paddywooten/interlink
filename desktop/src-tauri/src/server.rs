@@ -250,7 +250,14 @@ async fn handle_connection(
         for (_, tx) in inner.pending.drain() {
             let _ = tx.send(Envelope::error_response("?", "internal", "offline: reconnected"));
         }
+        // Connection changes wipe the collector map (see `clear_connection`);
+        // the mirror-audio relay survives them and must come out of the wipe
+        // still wired, or it keeps "playing" into a map with no entry.
+        let mirror_tx = inner.mirror_audio.as_ref().map(|h| h.tx.clone());
         inner.data_collectors.clear();
+        if let Some(tx) = mirror_tx {
+            inner.data_collectors.insert(crate::crypto::mirror_audio_tid(), tx);
+        }
         inner.outgoing.clear();
         let peer_ip = peer_addr.ip().to_string();
         let device_port = inner.cfg.port;
@@ -347,6 +354,10 @@ async fn handle_connection(
                         // Screen-mirror frames stream on a fixed tid with no
                         // collector: each chunk is one complete JPEG (seq is a
                         // frame counter) and is forwarded straight to the webview.
+                        // Mirror *audio* is deliberately NOT special-cased
+                        // here — it registers as an ordinary collector, so it
+                        // falls through to the branch below and dies with the
+                        // relay that registered it.
                         if tid == crate::crypto::mirror_tid() {
                             // Latest frame wins rather than queueing — see
                             // AppState::mirror_sink.
@@ -377,6 +388,9 @@ async fn handle_connection(
     if let Some(peer) = state.clear_connection().await {
         log::info!("phone disconnected: {}", peer.name);
     }
+    // Nothing feeds a mirror relay after this: leave it and it plays silence
+    // while holding the output device open.
+    crate::audio::stop_mirror(&state).await;
     state.emit("conn", json!({ "connected": false }));
 }
 
@@ -445,6 +459,19 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
             }
             ("device.battery", env.d)
         }
+        // Mirror lifecycle: the phone owns capture (projection + permission),
+        // so audio follows its report — `mirror.audio {ok, rate}` starts or
+        // stops the laptop's playout, and a dead mirror takes its audio with
+        // it. Off the connection task: opening a cpal device (and telling the
+        // phone to stand down if it fails) can take seconds, and nothing on
+        // this loop — frames, pongs — may wait behind it.
+        "mirror.state" | "mirror.audio" => {
+            let st = state.clone();
+            let t = env.t.clone();
+            let d = env.d.clone();
+            tokio::spawn(async move { crate::audio::on_mirror_push(&st, &t, &d).await });
+            (env.t.as_str(), env.d)
+        }
         // Terminal event for a laptop-initiated transfer. Synthesize the
         // {name, path} shape the webview expects unless `transfer.done`
         // (which carries the name) already reported it.
@@ -481,8 +508,13 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
                 json!({ "name": name, "error": reason, "tid": env.d["tid"] }),
             )
         }
-        // Legacy phone builds pushed the un-prefixed alias.
-        "audio_state" => ("call.audio_state", env.d),
+        // Legacy phone builds pushed the un-prefixed alias. This one is worth
+        // keeping in the log: it is the phone's *own* verdict on whether the
+        // relay is carrying anything.
+        "audio_state" => {
+            log::info!("phone reports call audio: {}", env.d);
+            ("call.audio_state", env.d)
+        }
         other => (other, env.d),
     };
     // A command may be parked on this exact push (e.g. `backup_restore`
@@ -497,6 +529,9 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
     // Raise a native popup too, so the event is still surfaced with the
     // window minimised to the tray (the in-app list alone would be missed).
     crate::popup::maybe_show(state, app, &t, &d).await;
+    // Every push, at debug: without this line there is no way to tell a
+    // phone that stopped sending from a laptop that stopped listening.
+    log::debug!("push {t}: {d}");
     state.emit("push", json!({ "t": t, "d": d }));
 }
 

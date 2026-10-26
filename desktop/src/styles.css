@@ -1175,6 +1175,43 @@ nav {
   color: var(--green);
 }
 
+/* Call-log rows on the Calls page: green for calls that connected, red for
+   the ones that didn't (that's the one colour people scan a history for). */
+.log-ico {
+  color: var(--fg2);
+  font-size: 15px;
+}
+
+.log-ico.in,
+.log-ico.out,
+.log-ico.answered {
+  color: var(--green);
+}
+
+.log-ico.missed,
+.log-ico.rejected,
+.log-ico.blocked {
+  color: var(--red);
+}
+
+.log-ico.voicemail {
+  color: var(--accent);
+}
+
+.missed-num {
+  color: var(--red);
+}
+
+.log-new {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+
 /* ============ Settings ============ */
 .settings-grid {
   display: grid;
@@ -1556,6 +1593,80 @@ nav {
   color: var(--fg2);
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* ——— always-on in-call bar ——— */
+/* Follows you between pages: the Calls card only exists while you are on
+   Calls, and a ringing phone doesn't wait for you to navigate there. Sticky
+   above the player when both are up. */
+.call-bar {
+  position: sticky;
+  bottom: var(--player-h, 0px);
+  z-index: 7;
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 24px;
+  background: rgba(17, 21, 31, 0.97);
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.35);
+}
+
+/* The player's own auto margin would otherwise split a short page's free
+   space between the two bars instead of stacking them at the bottom. */
+.main.has-call .player-bar {
+  margin-top: 0;
+}
+
+.cb-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--yellow);
+  animation: cb-blink 1.2s ease-in-out infinite;
+}
+
+.cb-dot.active {
+  background: var(--green);
+  animation: none;
+}
+
+.cb-dot.incoming {
+  background: var(--accent);
+}
+
+@keyframes cb-blink {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+.cb-meta {
+  flex: 1;
+  min-width: 0;
+}
+
+.cb-who {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cb-sub {
+  color: var(--fg2);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cb-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 /* ——— always-on player ——— */

@@ -86,7 +86,7 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
             if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.CALL_PHONE) ==
                 PackageManager.PERMISSION_GRANTED
             ) {
-                ctx.startActivity(Intent(Intent.ACTION_CALL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                placeCall(uri)
             } else {
                 // No CALL_PHONE — hand off to the dialer with the number filled in.
                 ctx.startActivity(Intent(Intent.ACTION_DIAL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -101,6 +101,37 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
             "number" to number,
             "name" to (lookupName(number) ?: ""),
         )
+    }
+
+    /**
+     * Put the call onto the network — not merely onto the laptop's screen.
+     *
+     * `ACTION_CALL` hands off to the *dialer's* activity, and Android 10+
+     * blocks an activity launch from an app with no visible window (this one
+     * runs as a foreground service, usually with the screen off). The block is
+     * the nasty kind: the intent is dropped, **no exception is thrown**, so
+     * from here everything looks like success while the phone never dials.
+     * Telecom's own API is a binder call rather than an activity launch, so
+     * there is no background-activity rule in the way, and a refused call
+     * comes back as an exception — which the laptop can show, instead of
+     * sitting on a call that does not exist.
+     *
+     * `ACTION_CALL` stays as a fallback for the case where Telecom itself
+     * refuses `placeCall` but our own activity happens to be on screen: that
+     * was the only path that ever worked, so it is worth keeping.
+     */
+    private fun placeCall(uri: Uri) {
+        val telecom = ctx.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+        try {
+            telecom.placeCall(uri, Bundle())
+            CallRegistry.log("placeCall accepted for ${uri.schemeSpecificPart}")
+            return
+        } catch (t: Throwable) {
+            CallRegistry.log(
+                "placeCall refused (${t.javaClass.simpleName}: ${t.message}) — trying ACTION_CALL"
+            )
+        }
+        ctx.startActivity(Intent(Intent.ACTION_CALL, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     fun answer(@Suppress("UNUSED_PARAMETER") d: JsonElement): JsonObject {
@@ -198,6 +229,105 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
         return objOf("ok" to true)
     }
 
+    /** Frames read per candidate source while probing (~600 ms). */
+    private val probeFrames = 30
+
+    /** Consecutive frames of exact zeros that means "muted", not "quiet". */
+    private val silenceGateFrames = 100 // 2 s at 50 frames/s
+
+    /**
+     * Sources that might carry the far end of a cellular call, best first.
+     * Only `VOICE_CALL` and its siblings tap the call itself, and Android
+     * guards them behind `CAPTURE_AUDIO_OUTPUT` — a signature permission we do
+     * not have — so most builds refuse them and we fall through to the VoIP
+     * source and finally the raw microphone. Which one we land on decides what
+     * the laptop hears, so it is logged every time.
+     */
+    private val captureSources = listOf(
+        MediaRecorder.AudioSource.VOICE_CALL to "VOICE_CALL",
+        MediaRecorder.AudioSource.VOICE_DOWNLINK to "VOICE_DOWNLINK",
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION to "VOICE_COMMUNICATION",
+        MediaRecorder.AudioSource.DEFAULT to "DEFAULT(mic)",
+    )
+
+    /** Why [openCapture] found nothing — shown to the user, not swallowed. */
+    @Volatile
+    private var captureFailure: String = "capture_blocked"
+
+    /**
+     * The first source that hands back *audio*, not merely bytes.
+     *
+     * Bytes are not enough. A source can open, start and read perfectly well
+     * while the platform holds it muted for the whole call, handing back exact
+     * zeros — which is precisely what this handset does to
+     * VOICE_COMMUNICATION. Each candidate therefore gets ~600 ms of reads and
+     * is judged on its loudest sample; silence means "try the next one", and
+     * silence everywhere means the phone simply does not hand its call audio
+     * over, which the laptop is told rather than left to guess.
+     */
+    private fun openCapture(bufSize: Int, sampleRate: Int, frameBytes: Int): Pair<AudioRecord, String>? {
+        var opened = false
+        for ((src, name) in captureSources) {
+            val rec = try {
+                val r = AudioRecord(
+                    src, sampleRate,
+                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize,
+                )
+                if (r.state != AudioRecord.STATE_INITIALIZED) {
+                    r.release()
+                    CallRegistry.log("call audio: source $name will not initialise")
+                    null
+                } else {
+                    r
+                }
+            } catch (t: Throwable) {
+                CallRegistry.log("call audio: source $name refused to open (${t.javaClass.simpleName})")
+                null
+            } ?: continue
+
+            opened = true
+            val probe = ByteArray(frameBytes)
+            var loudest = 0
+            var reads = 0
+            while (reads < probeFrames) {
+                val n = try {
+                    if (reads == 0) rec.startRecording()
+                    rec.read(probe, 0, probe.size)
+                } catch (t: Throwable) {
+                    CallRegistry.log("call audio: source $name failed to read (${t.message})")
+                    -1
+                }
+                if (n <= 0) break
+                loudest = maxOf(loudest, peakOf(probe, n))
+                reads++
+                if (loudest > 0) break
+            }
+            CallRegistry.log("call audio: probe $name — loudest sample $loudest over $reads frames")
+            if (loudest > 0) return rec to name
+            runCatching { rec.stop() }
+            runCatching { rec.release() }
+        }
+        captureFailure = if (opened) "capture_silent" else "capture_blocked"
+        return null
+    }
+
+    /**
+     * Largest absolute 16-bit sample in `buf[0 until len]`. The only honest
+     * measure of "is there audio here": bytes can be plentiful and still be
+     * the exact zeros a muted HAL hands back.
+     */
+    private fun peakOf(buf: ByteArray, len: Int): Int {
+        var peak = 0
+        var k = 0
+        while (k + 1 < len) {
+            val v = (buf[k + 1].toInt() shl 8) or (buf[k].toInt() and 0xff)
+            val a = if (v < 0) -v else v
+            if (a > peak) peak = a
+            k += 2
+        }
+        return peak
+    }
+
     private fun startAudioLoop(cid: String, up: Boolean, down: Boolean) {
         if (streaming) return
         streaming = true
@@ -220,15 +350,20 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
                     ),
                     frameBytes * 8,
                 )
+                var capSrc = "none"
+                var tapSource = false
                 if (down) {
-                    rec = AudioRecord(
-                        MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate,
-                        AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize,
-                    )
-                    if (rec.state != AudioRecord.STATE_INITIALIZED) {
-                        audioBlocked(cid, "capture_blocked")
+                    val cap = openCapture(bufSize, sampleRate, frameBytes)
+                    if (cap == null) {
+                        audioBlocked(cid, captureFailure)
                         return@thread
                     }
+                    rec = cap.first
+                    capSrc = cap.second
+                    // A tap carries the call itself. A microphone can only
+                    // hear what the handset plays, so with a mic source the
+                    // handset has to keep playing or there is nothing to relay.
+                    tapSource = capSrc == "VOICE_CALL" || capSrc == "VOICE_DOWNLINK"
                 }
                 if (up) {
                     track = AudioTrack.Builder()
@@ -253,14 +388,19 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
                     // Laptop → phone: its mic arrives on the same tid.
                     inbound = client.collectorFor(inboundKey, capacity = 64)
                 }
-                rec?.startRecording()
-                Bus.push(
-                    "call.audio_state",
-                    objOf("callId" to cid, "ok" to true, "mode" to mode(up, down)),
-                )
+                if (rec?.recordingState != AudioRecord.RECORDSTATE_RECORDING) rec?.startRecording()
+                // `ok:true` is earned by audio, not by a successful open():
+                // this handset reads perfectly from a muted source, so nothing
+                // is announced until a non-zero sample actually arrives.
+                var announced = !down
+                var silence = 0L
+                var silenceSaid = !down
 
                 val buf = ByteArray(frameBytes)
                 var seq = 0
+                var frames = 0L
+                var peak = 0
+                var logAt = System.currentTimeMillis()
                 while (flag.get()) {
                     val t = track
                     if (up && t != null) drainInbound(inbound, t)
@@ -269,13 +409,63 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
                         val r0 = rec
                         while (off < frameBytes && flag.get() && r0 != null) {
                             val r = r0.read(buf, off, frameBytes - off)
-                            if (r <= 0) break
+                            if (r < 0) throw Exception("capture read failed (code $r)")
+                            if (r == 0) break
                             off += r
                         }
-                        if (off < frameBytes) break
-                        // sendData is suspend — bridge the thread boundary.
-                        if (!runBlocking { client.sendData(tid, seq, buf.copyOf()) }) break
-                        seq++
+                        if (off < frameBytes) {
+                            // stopAudio() clears the flag before interrupting,
+                            // so that is the normal exit. Anything else is a
+                            // capture that died — and it has to be *said*: the
+                            // old `break` swallowed it, leaving the laptop
+                            // promising "hearing through your laptop" while
+                            // every frame quietly stopped.
+                            if (flag.get()) audioBlocked(cid, "capture_stopped")
+                            break
+                        }
+                        val loudest = peakOf(buf, off)
+                        if (loudest == 0) silence++ else silence = 0
+                        if (!announced) {
+                            if (loudest > 0) {
+                                announced = true
+                                CallRegistry.log("call audio: downlink live via $capSrc")
+                                Bus.push(
+                                    "call.audio_state",
+                                    objOf("callId" to cid, "ok" to true, "mode" to mode(up, down)),
+                                )
+                            } else if (silence >= silenceGateFrames && !silenceSaid) {
+                                // Two seconds of exact zeros is not a quiet
+                                // call — it is a platform holding the tap
+                                // shut. Say so once, then keep watching: if
+                                // audio turns up later it announces itself.
+                                silenceSaid = true
+                                CallRegistry.log(
+                                    "call audio: $capSrc stays silent — this phone keeps its own call audio",
+                                )
+                                Bus.push(
+                                    "call.audio_state",
+                                    objOf("callId" to cid, "ok" to false, "reason" to "capture_silent"),
+                                )
+                            }
+                        }
+                        if (announced) {
+                            frames++
+                            if (loudest > peak) peak = loudest
+                            val now = System.currentTimeMillis()
+                            if (now - logAt >= 2000) {
+                                CallRegistry.log(
+                                    "call audio: downlink via $capSrc — $frames frames, peak $peak",
+                                )
+                                // A mic source needs the handset playing; only
+                                // a true tap earns taking it out of the way.
+                                if (peak > 0 && tapSource) CallRegistry.leaveLoudspeaker()
+                                peak = 0
+                                logAt = now
+                            }
+                            // sendData is suspend — bridge the thread boundary.
+                            if (!runBlocking { client.sendData(tid, seq, buf.copyOf()) }) break
+                            seq++
+                        }
                     } else {
                         // No capture (hear through the phone) — keep draining only.
                         Thread.sleep(20)
@@ -312,6 +502,10 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
 
     private fun audioBlocked(cid: String, reason: String) {
         streaming = false
+        // Nothing is being relayed any more: hand the call back to the phone
+        // as it was before we took the loudspeaker away.
+        CallRegistry.restoreLoudspeaker()
+        CallRegistry.log("call audio: relay down ($reason)")
         Bus.push("call.audio_state", objOf("callId" to cid, "ok" to false, "reason" to reason))
     }
 
@@ -326,5 +520,6 @@ class CallHandler(private val ctx: Context, private val client: LinkClient) {
         runCatching { t?.join(1500) }
         runCatching { audioSink?.stop() }
         audioSink = null
+        CallRegistry.restoreLoudspeaker()
     }
 }

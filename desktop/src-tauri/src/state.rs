@@ -190,6 +190,8 @@ pub struct Inner {
     /// paint as fast as the phone captures, and queueing those frames would
     /// turn "a bit slow" into lag that grows without bound.
     pub mirror_tx: Option<tokio::sync::watch::Sender<MirrorFrame>>,
+    /// Active screen-mirror audio relay (phone playback → laptop output).
+    pub mirror_audio: Option<crate::audio::MirrorAudioHandle>,
     /// In-flight "wait for a push" reservations keyed like
     /// `filedone:<tid-b64u>` or `backupresult:<tid-b64u>`.
     pub waiters: HashMap<String, oneshot::Sender<Value>>,
@@ -206,6 +208,10 @@ pub struct AppState {
     /// relay, and the loser's handle would be overwritten — leaving its
     /// microphone stream open with nothing draining it.
     pub call_audio_gate: tokio::sync::Mutex<()>,
+    /// Serializes mirror-audio start/stop for the same reason: the phone's
+    /// "started"/"stopped" pushes and a local `mirror_stop` can land close
+    /// together, and each half of that pair must see the other's work.
+    pub mirror_audio_gate: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -214,6 +220,7 @@ impl AppState {
         let (events, _) = tokio::sync::broadcast::channel(256);
         Arc::new(AppState {
             call_audio_gate: tokio::sync::Mutex::new(()),
+            mirror_audio_gate: tokio::sync::Mutex::new(()),
             inner: Mutex::new(Inner {
                 cfg,
                 cfg_path,
@@ -227,6 +234,7 @@ impl AppState {
                 adb_device: None,
                 waiters: HashMap::new(),
                 mirror_tx: None,
+                mirror_audio: None,
             }),
             events,
         })
@@ -412,7 +420,15 @@ impl AppState {
         for (_, tx) in inner.pending.drain() {
             let _ = tx.send(Envelope::error_response("?", "internal", "offline: connection lost"));
         }
+        // The mirror relay outlives a connection change — its picture does
+        // too (`mirror_sink` rebuilds on demand) — so keep its collector
+        // across the wipe. Dropping it here left a relay reporting "active"
+        // while every frame was thrown away: mirrored picture, no sound.
+        let mirror_tx = inner.mirror_audio.as_ref().map(|h| h.tx.clone());
         inner.data_collectors.clear();
+        if let Some(tx) = mirror_tx {
+            inner.data_collectors.insert(crate::crypto::mirror_audio_tid(), tx);
+        }
         inner.outgoing.clear();
         // Dropping the sink ends the mirror pump; a stale frame must not keep
         // painting over a disconnected screen.
