@@ -80,15 +80,24 @@ interlink/
 ├── desktop/         # Tauri app (Rust backend + React frontend)
 │   ├── src/         # React/TS UI
 │   └── src-tauri/   # Rust: server, encryption, audio, tray
-└── android/         # Kotlin Android app
+├── android/         # Kotlin Android app
+└── packaging/       # one-click installers, one folder per OS
+    ├── macos/       #   build-dmg.sh      → .dmg
+    ├── windows/     #   build-msi.bat     → .msi
+    └── linux/       #   build-linux.sh    → .deb + .AppImage
 ```
 
 ## Development setup
 
-> **Windows / macOS**: see [BUILD.md](BUILD.md) for per-OS prerequisites,
-> build steps, signing notes, and firewall/permission gotchas. CI
-> (`.github/workflows/build.yml`) builds installers for all three desktop OSes
-> plus the Android APK on every push and on `v*` tags.
+> **Building an installer?** Each desktop OS has a folder in
+> [`packaging/`](packaging/) with a script you can double-click — it checks the
+> toolchain, builds, and leaves the installer in `packaging/<os>/out/`.
+>
+> **Developing?** See [BUILD.md](BUILD.md) for per-OS prerequisites, signing
+> notes and the firewall/permission checklist, plus the README beside each
+> script for that OS's detail. CI (`.github/workflows/build.yml`) builds
+> installers for all three desktop OSes plus the Android APK on every push and
+> on `v*` tags.
 
 Tooling is installed user-locally (no root required):
 

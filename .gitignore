@@ -25,3 +25,6 @@ captures/
 
 # Logs
 *.log
+
+# Installer output (one-click build scripts)
+packaging/*/out/
