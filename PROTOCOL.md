@@ -140,10 +140,16 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 
 **Scope: every app, by default.** The phone mirrors a notification from
 whichever package raised it, excluding only InterLink itself (whose own
-foreground-service notification would echo straight back forever). An optional
-per-package allowlist exists for users who want to narrow this, but it is
-empty by default — an allowlist is the wrong default, because what it gets
-wrong it gets wrong silently, with the dropped app simply never appearing.
+foreground-service notification would echo straight back forever). There is no
+allowlist — one existed, seeded by an early build with a five-package list of
+SMS and dialer apps. Nothing has ever written it since, so on real devices it
+lingered in SharedPreferences and silently filtered out WhatsApp, the gallery
+and everything else while the listener stayed bound and healthy. It hid
+exceptionally well, because `com.android.shell` was one of those five: an adb
+test notification mirrored cleanly, so the feature looked proven end to end
+while real notifications died on the first line of the callback. A filter with
+no UI and a failure mode of total silence is a trap, so the only filter left is
+"not us".
 
 **Actions and replies.** `token` is an index into the posting notification's
 `actions`, and `reply: true` marks the one carrying Android `RemoteInput` —

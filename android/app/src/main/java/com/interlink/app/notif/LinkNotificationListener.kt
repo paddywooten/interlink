@@ -23,10 +23,8 @@ import java.util.ArrayDeque
 /**
  * Mirrors notifications to the laptop (PROTOCOL.md §4.2).
  *
- * Scope: every app except this one, with an optional per-package allowlist
- * ("il_notif" SharedPreferences set "allow"; empty = everything) for users who
- * want to narrow it. Replies (RemoteInput) arrive as notif.action
- * {key, token, reply} requests from the laptop.
+ * Scope: every app except this one (see [mirrored]). Replies (RemoteInput)
+ * arrive as notif.action {key, token, reply} requests from the laptop.
  */
 class LinkNotificationListener : NotificationListenerService() {
 
@@ -89,6 +87,25 @@ class LinkNotificationListener : NotificationListenerService() {
          */
         private val DEFAULT_DENY = setOf("com.interlink.app")
 
+        /**
+         * Whether this package's notifications are mirrored.
+         *
+         * Deliberately unconditional apart from [DEFAULT_DENY]. There used to
+         * be an opt-in allowlist here, seeded by an early build with a short
+         * list of SMS and dialer apps and stored in SharedPreferences. Nothing
+         * has written it since, so on real devices it survived as a stale
+         * five-package list that silently swallowed WhatsApp, the gallery and
+         * every other notification while the listener stayed bound and healthy
+         * — and because `com.android.shell` happened to be on it, an adb test
+         * notification mirrored cleanly, making the whole feature look proven
+         * end to end.
+         *
+         * A filter with no UI to change it and a failure mode of total silence
+         * is a trap, so the only filter left is "not us". Kept in the
+         * companion so it is testable without a live service.
+         */
+        internal fun mirrored(pkg: String?): Boolean = pkg != null && pkg !in DEFAULT_DENY
+
         /** Recent dismissals, newest first — served by notif.history. */
         private val history = ArrayDeque<JsonObject>()
 
@@ -114,26 +131,6 @@ class LinkNotificationListener : NotificationListenerService() {
         }
     }
 
-    /**
-     * Optional allowlist of packages. Empty — the default — means "mirror
-     * everything that isn't in [DEFAULT_DENY]".
-     *
-     * This defaulted to a short list of SMS and dialer apps, so WhatsApp,
-     * Gmail, Slack and every other app nobody remembered to add were dropped
-     * before they ever reached the laptop. An allowlist is the wrong default:
-     * what it gets wrong, it gets wrong silently.
-     */
-    private val allowlist: Set<String>
-        get() = getSharedPreferences("il_notif", MODE_PRIVATE)
-            .getStringSet("allow", emptySet()) ?: emptySet()
-
-    /** Whether this package's notifications are mirrored. */
-    private fun mirrored(pkg: String?): Boolean {
-        if (pkg == null || pkg in DEFAULT_DENY) return false
-        val allow = allowlist
-        return allow.isEmpty() || pkg in allow
-    }
-
     override fun onListenerConnected() {
         super.onListenerConnected()
         instance = this
@@ -151,7 +148,15 @@ class LinkNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (!mirrored(sbn.packageName)) return
+        // Logged before any filtering. This line is the difference between
+        // "the system never told us" and "we chose not to mirror it" — a
+        // distinction invisible from the laptop, and the whole ballgame when
+        // a listener is bound yet mirrors nothing.
+        Log.i(TAG, "posted ${sbn.packageName} key=${sbn.key}")
+        if (!mirrored(sbn.packageName)) {
+            Log.i(TAG, "  skip ${sbn.packageName}: not mirrored")
+            return
+        }
         val n = sbn.notification ?: return
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""
@@ -197,6 +202,8 @@ class LinkNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        // Symmetric with onNotificationPosted: proof the system reached us.
+        Log.i(TAG, "removed ${sbn.packageName} key=${sbn.key}")
         if (!mirrored(sbn.packageName)) return
         val n = sbn.notification
         val extras = n?.extras
