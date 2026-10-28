@@ -443,7 +443,7 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
     // 3. Pushes: side effects first, then forward {t, d} to the webview.
     //    Anything not matched below is relayed verbatim, so new phone-side
     //    push types reach the UI without a server change.
-    let (t, d) = match env.t.as_str() {
+    let (t, mut d) = match env.t.as_str() {
         "unpair" => {
             state.clear_connection().await;
             state.emit("conn", json!({ "connected": false }));
@@ -524,6 +524,15 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
             state
                 .resolve_waiter(&crate::state::waiter_key("backupresult", tid), d.clone())
                 .await;
+        }
+    }
+    // A notification may carry a picture attachment. Pull it off here and
+    // keep the bytes: the webview gets a flag and asks for them by key, so a
+    // screenful of photos is not parked in the store for rows nobody opens.
+    if t == "notif.post" {
+        if let Some(bytes) = take_notif_image(&mut d) {
+            let key = d["key"].as_str().unwrap_or_default().to_string();
+            state.remember_notif_image(key, bytes).await;
         }
     }
     // Raise a native popup too, so the event is still surfaced with the
@@ -722,4 +731,72 @@ pub fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// Base64url helper shared with commands.
 pub fn b64u(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+/// Take a `notif.post` image attachment off the payload, returning its bytes.
+///
+/// The push is left with `hasImage: true` instead. Two reasons the base64
+/// itself must not reach the webview: a screenful of 300 KB thumbnails would
+/// sit in the store as tens of megabytes for notifications the user may never
+/// open, and the thumbnail and the save action both need the bytes anyway —
+/// better one copy, held here, served by key.
+///
+/// A payload whose base64 will not decode has its `image` dropped too: a
+/// field the UI cannot use is only weight, and "there is a picture" with no
+/// picture is a worse promise than no picture at all.
+pub fn take_notif_image(d: &mut Value) -> Option<Vec<u8>> {
+    let Value::Object(map) = d else { return None };
+    let image = map.remove("image")?;
+    let data = image.get("data").and_then(|v| v.as_str());
+    let bytes = data.and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+    if bytes.is_some() {
+        map.insert("hasImage".into(), Value::Bool(true));
+    }
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_notif_image;
+    use base64::Engine;
+    use serde_json::json;
+
+    fn post(image: serde_json::Value) -> serde_json::Value {
+        json!({ "key": "0|com.whatsapp|1", "title": "hi", "image": image })
+    }
+
+    #[test]
+    fn a_decoded_attachment_becomes_a_flag() {
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"jpegbytes");
+        let mut d = post(json!({ "w": 640, "h": 480, "mime": "image/jpeg", "data": payload }));
+        let bytes = take_notif_image(&mut d).expect("attachment should be taken");
+        assert_eq!(bytes, b"jpegbytes");
+        // The bytes are gone from the payload the webview will receive…
+        assert!(d.get("image").is_none());
+        // …but the UI still knows one exists.
+        assert_eq!(d["hasImage"], json!(true));
+        // Everything else about the notification survives untouched.
+        assert_eq!(d["title"], json!("hi"));
+    }
+
+    #[test]
+    fn undecodable_base64_is_dropped_not_forwarded() {
+        let mut d = post(json!({ "w": 1, "h": 1, "data": "not base64!!" }));
+        assert!(take_notif_image(&mut d).is_none());
+        assert!(d.get("image").is_none(), "junk must not reach the webview");
+        assert!(d.get("hasImage").is_none(), "and must not promise a picture");
+    }
+
+    #[test]
+    fn a_payload_without_an_attachment_is_left_alone() {
+        let mut d = json!({ "key": "k", "title": "plain" });
+        assert!(take_notif_image(&mut d).is_none());
+        assert_eq!(d, json!({ "key": "k", "title": "plain" }));
+    }
+
+    #[test]
+    fn non_object_payloads_are_ignored() {
+        let mut d = json!("just a string");
+        assert!(take_notif_image(&mut d).is_none());
+    }
 }

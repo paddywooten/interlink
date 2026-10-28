@@ -174,6 +174,11 @@ class LinkNotificationListener : NotificationListenerService() {
                 "key" to sbn.key,
                 "pkg" to (sbn.packageName ?: ""),
                 "app" to appName,
+                // The app's own logo, so a wall of mirrored notifications can be
+                // read by origin at a glance instead of by name.
+                "icon" to NotificationAssets.appIcon(packageManager, sbn.packageName),
+                // Present only when the app actually attached a picture.
+                "image" to NotificationAssets.pictureFor(this, sbn.key, n),
                 "title" to title,
                 "text" to text,
                 "bigText" to bigText,
@@ -212,6 +217,9 @@ class LinkNotificationListener : NotificationListenerService() {
                 "key" to sbn.key,
                 "pkg" to (sbn.packageName ?: ""),
                 "app" to appName(sbn.packageName),
+                // History rows carry the logo too — the History tab is read the
+                // same way the live list is, by "which app was that".
+                "icon" to NotificationAssets.appIcon(packageManager, sbn.packageName),
                 "title" to (extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString() ?: ""),
                 "text" to (extras?.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""),
                 "when" to (n?.`when` ?: 0L),

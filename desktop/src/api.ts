@@ -174,6 +174,12 @@ export const notifHistory = (limit = 100) =>
 export const notifAction = (key: string, token: string, reply?: string) =>
   req("notif.action", { key, token, reply });
 export const notifDismiss = (key: string) => req("notif.dismiss", { key }).catch(() => undefined);
+/** Base64 of a mirrored notification's attachment, for the thumbnail. */
+export const notifImage = (key: string) =>
+  invoke<{ mime: string; data: string }>("notif_image", { key });
+/** Save an attachment into the download folder; returns the path it landed on. */
+export const notifSaveImage = (key: string, name?: string) =>
+  invoke<string>("notif_save_image", { key, name });
 export const mediaList = (
   offset: number,
   limit: number,

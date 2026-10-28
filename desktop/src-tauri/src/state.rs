@@ -4,7 +4,7 @@ use crate::crypto::FrameKey;
 use crate::protocol::Envelope;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -13,6 +13,10 @@ pub const DEFAULT_PORT: u16 = 27341;
 /// UDP port for LAN device-presence beacons (kept separate from the connect
 /// path on DEFAULT_PORT so discovery never disturbs an active pairing).
 pub const BEACON_PORT: u16 = 27342;
+
+/// Mirrored notification attachments held for the UI, oldest evicted first.
+/// Each is a photo, so the count stays small on purpose.
+const NOTIF_IMAGE_CACHE: usize = 32;
 
 /// A device seen on the LAN via periodic `ILANN` beacons.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +199,10 @@ pub struct Inner {
     /// In-flight "wait for a push" reservations keyed like
     /// `filedone:<tid-b64u>` or `backupresult:<tid-b64u>`.
     pub waiters: HashMap<String, oneshot::Sender<Value>>,
+    /// Attachments carried by mirrored notifications, keyed by notification
+    /// key, oldest first. The push itself carries only a flag — see
+    /// [crate::server::take_notif_image].
+    pub notif_images: VecDeque<(String, Vec<u8>)>,
 }
 
 pub struct AppState {
@@ -233,6 +241,7 @@ impl AppState {
                 devices: HashMap::new(),
                 adb_device: None,
                 waiters: HashMap::new(),
+                notif_images: VecDeque::new(),
                 mirror_tx: None,
                 mirror_audio: None,
             }),
@@ -358,6 +367,34 @@ impl AppState {
     /// Whether phone events should also be re-raised as native popups.
     pub async fn notif_popup(&self) -> bool {
         self.inner.lock().await.cfg.notif_popup
+    }
+
+    /// Keep a mirrored notification's attachment so the UI can show and save
+    /// it by key.
+    ///
+    /// Re-keyed rather than appended: an app that updates its notification
+    /// pushes again, and the newest picture is the one worth keeping.
+    pub async fn remember_notif_image(&self, key: String, bytes: Vec<u8>) {
+        let mut inner = self.inner.lock().await;
+        let q = &mut inner.notif_images;
+        q.retain(|(k, _)| k != &key);
+        q.push_back((key, bytes));
+        while q.len() > NOTIF_IMAGE_CACHE {
+            q.pop_front();
+        }
+    }
+
+    /// Copy of a remembered attachment.
+    ///
+    /// Taken, not consumed: the thumbnail and the "save" action both want it,
+    /// and the user may save the same photo twice.
+    pub async fn get_notif_image(&self, key: &str) -> Option<Vec<u8>> {
+        let inner = self.inner.lock().await;
+        inner
+            .notif_images
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, bytes)| bytes.clone())
     }
 
     /// The screen-mirror frame sink, created along with its pump task on

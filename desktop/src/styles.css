@@ -927,6 +927,39 @@ nav {
   word-break: break-word;
 }
 
+/* The posting app's own logo. Contain, so an icon with transparent padding
+   still reads at 40px; the backdrop covers the same transparency. */
+.notif-logo {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  object-fit: contain;
+  background: var(--bg3);
+}
+
+/* A picture that arrived with the notification. */
+.notif-attachment {
+  margin-top: 8px;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.notif-attachment img {
+  max-width: 260px;
+  max-height: 220px;
+  border-radius: 10px;
+  display: block;
+}
+
+.notif-attachment-pending {
+  color: var(--fg2);
+  font-size: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--bg3);
+  border-radius: 10px;
+}
+
 .notif-actions {
   display: flex;
   gap: 8px;

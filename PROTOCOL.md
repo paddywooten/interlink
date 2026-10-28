@@ -138,6 +138,31 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 
 `key` = Android `StatusBarNotification.key`.
 
+**Logos and pictures.** `icon` is the posting app's own launcher icon as a
+base64 PNG (~128px), so a wall of mirrored notifications can be read by origin
+at a glance. It is the launcher icon and not the status-bar small icon
+deliberately: the small icon is a monochrome silhouette that says nothing about
+which app raised the notification, which is the entire reason it is sent.
+
+`image` is present only when the app actually attached a picture —
+`BigPictureStyle`'s `EXTRA_PICTURE` (the photo in a photo message, the preview
+on a screenshot), falling back to an unusually large `EXTRA_LARGE_ICON`. It
+carries `{w, h, mime, data}` with `data` base64 JPEG, scaled to 1280px and
+re-shot smaller if it would exceed 400KB. A contact's avatar does not qualify:
+messaging apps put those in `EXTRA_LARGE_ICON` on every message, and a
+quarter-megabyte avatar is not an attachment.
+
+The same picture is not sent twice for the same key. Messaging apps re-post
+their notification on every incoming message, each carrying the same photo
+again; the phone tracks a per-key signature so an update storm stays as cheap
+as text.
+
+The laptop stores the decoded bytes itself and strips `image` from the payload
+it passes to the UI, leaving `hasImage: true` in its place — a screenful of
+300KB thumbnails held in the store for rows nobody opens is not a trade worth
+making. `notif_image {key}` returns them for the thumbnail and
+`notif_save_image {key, name?}` writes them into the download folder.
+
 **Scope: every app, by default.** The phone mirrors a notification from
 whichever package raised it, excluding only InterLink itself (whose own
 foreground-service notification would echo straight back forever). There is no

@@ -728,9 +728,115 @@ impl Opener {
     }
 }
 
+/// Base64 of a mirrored notification's attachment, for the in-app thumbnail.
+#[tauri::command]
+pub async fn notif_image(state: State<'_, SharedState>, key: String) -> Result<Value, String> {
+    let bytes = state
+        .get_notif_image(&key)
+        .await
+        .ok_or_else(|| "that attachment is no longer held".to_string())?;
+    Ok(json!({
+        "mime": "image/jpeg",
+        "data": base64::engine::general_purpose::STANDARD.encode(bytes),
+    }))
+}
+
+/// Save a mirrored notification's attachment into the download folder.
+///
+/// This is the whole point of mirroring a picture in the first place: a photo
+/// that arrives in a notification is usually one the user wants to keep, and
+/// on the phone it is already on its way out — apps cancel those notifications
+/// almost as soon as they show them.
+#[tauri::command]
+pub async fn notif_save_image(
+    state: State<'_, SharedState>,
+    key: String,
+    name: Option<String>,
+) -> Result<String, String> {
+    let bytes = state
+        .get_notif_image(&key)
+        .await
+        .ok_or_else(|| "that attachment is no longer held".to_string())?;
+    let configured = {
+        let inner = state.inner.lock().await;
+        inner.cfg.download_dir.clone()
+    };
+    let base = configured
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(server::default_download_dir);
+    let _ = tokio::fs::create_dir_all(&base).await;
+    let dest = server::unique_path(&base, &safe_filename(name.as_deref().unwrap_or("attachment")));
+    tokio::fs::write(&dest, &bytes)
+        .await
+        .map_err(|e| format!("could not write the file: {e}"))?;
+    log::info!("saved notification attachment to {}", dest.display());
+    Ok(dest.display().to_string())
+}
+
+/// Turn a notification's app name and title into a safe file name.
+///
+/// The name is arbitrary text from arbitrary apps, so it has to survive the
+/// trip into a folder: separators would climb out of the download directory,
+/// leading dots would hide the file, and a name made entirely of junk must
+/// still produce something writable.
+pub fn safe_filename(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            c if c.is_control() => ' ',
+            c => c,
+        })
+        .collect();
+
+    // Truncate by characters, not bytes: `String::truncate` panics on a
+    // multi-byte boundary, and app titles are full of them.
+    let mut name: String = cleaned
+        .chars()
+        .take(120)
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        name = "attachment".into();
+    }
+    if !name.to_lowercase().ends_with(".jpg") {
+        name.push_str(".jpg");
+    }
+    name
+}
+
 #[cfg(test)]
 mod tests {
-    use super::pct;
+    use super::{pct, safe_filename};
+
+    /// An app name and a title arrive as free text from arbitrary apps; the
+    /// result still has to be a file inside the download folder.
+    #[test]
+    fn attachment_names_stay_inside_the_download_folder() {
+        assert_eq!(safe_filename("WhatsApp"), "WhatsApp.jpg");
+        // Separators become dashes and leading dots go, so nothing climbs out.
+        assert_eq!(safe_filename("../../etc/passwd"), "-..-etc-passwd.jpg");
+        assert_eq!(safe_filename(".."), "attachment.jpg");
+        assert_eq!(safe_filename("   "), "attachment.jpg");
+        assert_eq!(safe_filename(""), "attachment.jpg");
+        assert_eq!(safe_filename("IMG:2026/10/28"), "IMG-2026-10-28.jpg");
+        // An extension that is already there is not doubled up.
+        assert_eq!(safe_filename("already.jpg"), "already.jpg");
+        assert_eq!(safe_filename("photo.JPG"), "photo.JPG");
+    }
+
+    #[test]
+    fn control_characters_and_very_long_titles_are_tamed() {
+        assert_eq!(safe_filename("a\u{0}b\nc"), "a b c.jpg");
+        // A 500-character emoji title must not panic on a byte boundary.
+        let long = "📸".repeat(250);
+        let out = safe_filename(&long);
+        assert!(out.chars().count() <= 124, "got {} chars", out.chars().count());
+        assert!(out.ends_with(".jpg"));
+    }
 
     /// The phone splits the path on `:` to work out which collection an id
     /// names, so the separator has to survive the trip unchanged — and a raw

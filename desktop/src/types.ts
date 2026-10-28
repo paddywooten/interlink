@@ -62,6 +62,12 @@ export interface NotifItem {
    *  reply has to be sent back to). */
   actions?: { label: string; token: string; reply?: boolean }[];
   hasReply?: boolean;
+  /** The posting app's logo, base64 PNG. Null when the phone couldn't get one. */
+  icon?: string | null;
+  /** The phone attached a picture. The bytes are not on the push — the
+   *  laptop keeps them and serves them by key, so the store never holds a
+   *  screenful of thumbnails. */
+  hasImage?: boolean;
   avatar?: string | null;
   ts?: number; // local receive time
 }

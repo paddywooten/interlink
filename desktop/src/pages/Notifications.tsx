@@ -3,12 +3,75 @@ import * as api from "../api";
 import type { NotifItem } from "../types";
 import { removeNotification, setState, toast, useStore } from "../store";
 
+/**
+ * Thumbnail data URLs by notification key.
+ *
+ * Kept out of the store on purpose: the attachment bytes are large, the store
+ * holds 200 notifications, and only the rows on screen ever ask for one.
+ */
+const thumbs = new Map<string, string>();
+
 function timeAgo(ts: number) {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 60) return "now";
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
   return `${Math.floor(s / 86400)}d`;
+}
+
+/**
+ * A picture that arrived with the notification.
+ *
+ * Notifications carrying images are usually cancelled on the phone within
+ * seconds — that is exactly why the picture is mirrored with the notification
+ * rather than fetched later. Downloading writes it into the download folder
+ * under the app and title, so it is findable afterwards.
+ */
+function NotifAttachment({ n }: { n: NotifItem }) {
+  const [src, setSrc] = useState<string | null>(() => thumbs.get(n.key) ?? null);
+
+  useEffect(() => {
+    if (src) return;
+    let alive = true;
+    api
+      .notifImage(n.key)
+      .then((r) => {
+        const url = `data:${r.mime};base64,${r.data}`;
+        if (thumbs.size > 100) thumbs.clear();
+        thumbs.set(n.key, url);
+        if (alive) setSrc(url);
+      })
+      .catch(() => {
+        // Offline or already evicted; the Download button still reports why.
+        if (alive) setSrc(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [n.key, src]);
+
+  const save = async () => {
+    try {
+      const name = `${n.app || n.pkg} ${n.title}`.trim();
+      const path = await api.notifSaveImage(n.key, name);
+      toast(`Saved to ${path}`, "success");
+    } catch (e) {
+      toast(String(e), "error");
+    }
+  };
+
+  return (
+    <div className="notif-attachment">
+      {src ? (
+        <img src={src} alt="" loading="lazy" />
+      ) : (
+        <div className="notif-attachment-pending">Picture</div>
+      )}
+      <button className="btn tiny ghost" onClick={save}>
+        Download
+      </button>
+    </div>
+  );
 }
 
 export default function Notifications() {
@@ -101,7 +164,13 @@ export default function Notifications() {
           const replyToken = (n.actions ?? []).find((a) => a.reply)?.token ?? "";
           return (
             <div key={n.key + (n.when ?? 0)} className={`notif ${n.ongoing ? "ongoing" : ""}`}>
-            <div className="notif-avatar">{(n.app || "?").slice(0, 1).toUpperCase()}</div>
+            <div className="notif-avatar">
+              {n.icon ? (
+                <img className="notif-logo" src={`data:image/png;base64,${n.icon}`} alt="" />
+              ) : (
+                (n.app || "?").slice(0, 1).toUpperCase()
+              )}
+            </div>
             <div className="notif-main">
               <div className="notif-top">
                 <span className="notif-app">{n.app}</span>
@@ -109,6 +178,7 @@ export default function Notifications() {
               </div>
               <div className="notif-title">{n.title}</div>
               {n.text && <div className="notif-text">{n.bigText || n.text}</div>}
+              {n.hasImage && <NotifAttachment n={n} />}
               <div className="notif-actions">
                 {n.hasReply && (
                   <button className="btn tiny" onClick={() => setReplyFor(replyFor === n.key ? null : n.key)}>

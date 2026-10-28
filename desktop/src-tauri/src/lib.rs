@@ -107,6 +107,8 @@ pub fn run() {
             commands::pick_directory,
             commands::pick_files,
             commands::reveal_in_folder,
+            commands::notif_image,
+            commands::notif_save_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
