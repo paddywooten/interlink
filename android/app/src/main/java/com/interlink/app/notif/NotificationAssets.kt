@@ -95,10 +95,8 @@ object NotificationAssets {
             ?: return null
 
         val (shown, bytes) = encodeToFit(source) ?: return null
-        // Messaging apps re-post the same notification on every message, each
-        // carrying the same picture again. The laptop already has it; re-sending
-        // would cost a couple of hundred kilobytes per message for nothing.
-        if (!attachments.alreadySent(key, bytes.contentHashCode())) return null
+        // The same picture is not sent twice for the same notification key.
+        if (!attachments.shouldSend(key, bytes.contentHashCode())) return null
 
         Log.i(TAG, "attachment $key: ${bytes.size / 1024}kB ${shown.width}x${shown.height}")
         return objOf(
@@ -125,8 +123,24 @@ object NotificationAssets {
         val value: Parcelable? = extras.getParcelable(key)
         return when (value) {
             is Bitmap -> value
-            is Icon -> runCatching { value.loadDrawable(ctx) }.getOrNull()?.let { rasterise(it) }
-            else -> null
+            is Icon -> {
+                // `Icon.getBitmap()` is @hide — not in the public SDK — so the
+                // drawable is the only way in. Worth logging what comes out:
+                // a silent decline here is indistinguishable from "the app
+                // sent no picture at all", and those mean very different
+                // things when a download doesn't appear.
+                val drawable = runCatching { value.loadDrawable(ctx) }.getOrNull()
+                if (drawable == null) {
+                    Log.w(TAG, "$key: icon produced no drawable")
+                    return null
+                }
+                Log.d(TAG, "$key: icon -> ${drawable.javaClass.simpleName}")
+                rasterise(drawable)
+            }
+            else -> {
+                if (value != null) Log.w(TAG, "$key: unexpected picture type ${value.javaClass.simpleName}")
+                null
+            }
         }
     }
 
@@ -185,20 +199,27 @@ object NotificationAssets {
 }
 
 /**
- * Remembers which attachment was already sent for a notification key.
+ * Decides whether an attachment is one this notification has not gone out
+ * with yet.
  *
- * Bounded and access-ordered, so a notification that keeps being updated stays
- * remembered while older ones age out.
+ * Messaging apps re-post the same notification on every incoming message and
+ * each re-post carries the same picture again. The laptop already has that
+ * picture, so re-sending would cost a couple of hundred kilobytes per message
+ * for nothing. Keyed by notification key and bounded (access-ordered, so an
+ * actively-updating notification stays remembered while older ones age out).
+ *
+ * The answer is phrased as "should this be sent" rather than "have we seen
+ * it" so the call site cannot quietly invert it — that inversion is a bug
+ * this class exists to prevent, and it fails in the worst possible way: the
+ * first picture goes missing and every repeat is shipped instead.
  */
 internal class SignatureRing(private val cap: Int) {
     private val entries = object : LinkedHashMap<String, Int>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>) = size > cap
     }
 
-    /** True if [key] has already gone out with exactly this [signature]. */
+    /** True if [key] has not already gone out with exactly this [signature]. */
     @Synchronized
-    fun alreadySent(key: String, signature: Int): Boolean {
-        val previous = entries.put(key, signature)
-        return previous == signature
-    }
+    fun shouldSend(key: String, signature: Int): Boolean =
+        entries.put(key, signature) != signature
 }
