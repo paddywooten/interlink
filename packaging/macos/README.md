@@ -56,6 +56,10 @@ Open the `.dmg` and drag **InterLink** into `Applications`.
 
 ### Signing / notarization
 
+One arch note: CI's prebuilt `.dmg` is **Apple Silicon (arm64)** because the
+GitHub macOS runners are arm64. On an Intel Mac, run `build-dmg.command`
+yourself — it builds for whatever architecture the Mac is.
+
 `build-dmg.sh` produces an ad-hoc-signed app — fine for personal use; Gatekeeper
 warns on first open → right-click → Open. For distribution, set
 `bundle.macOS.signingIdentity` in `desktop/src-tauri/tauri.conf.json` and
