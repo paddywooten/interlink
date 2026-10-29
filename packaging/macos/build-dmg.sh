@@ -2,10 +2,12 @@
 #
 # One-click InterLink build for macOS → InterLink_*.dmg
 #
-# Double-click this file in Finder (macOS asks you to right-click → Open the
-# first time), or run it from a terminal:
+# Double-click build-dmg.command in Finder, or run this file from a terminal:
 #
 #     ./packaging/macos/build-dmg.sh
+#
+# (Finder can't run a .sh directly — it opens it in an editor — so the
+# .command beside this file is the double-clickable entry point.)
 #
 # It checks the toolchain, installs the frontend dependencies, builds the app
 # and leaves the installer in packaging/macos/out/.

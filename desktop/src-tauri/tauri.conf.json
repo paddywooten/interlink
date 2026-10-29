@@ -31,12 +31,22 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "InterLink",
+    "category": "Utility",
+    "shortDescription": "Link an Android phone to a laptop: notifications, calls, files and screen.",
+    "longDescription": "InterLink links an Android phone to a laptop over the local network. Notifications, calls, files, clips and the phone's screen cross between the two, end-to-end encrypted, with no cloud in the middle.",
+    "copyright": "© 2026 InterLink",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["libasound2 | libasound2t64"]
+      }
+    }
   }
 }

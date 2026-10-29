@@ -16,7 +16,7 @@ every note that belongs to that platform:
 
 | OS | Folder | Double-click | Produces |
 |---|---|---|---|
-| macOS | [`packaging/macos/`](packaging/macos/) | `build-dmg.sh` | `InterLink_*.dmg` |
+| macOS | [`packaging/macos/`](packaging/macos/) | `build-dmg.command` | `InterLink_*.dmg` |
 | Windows | [`packaging/windows/`](packaging/windows/) | `build-msi.bat` | `InterLink_*.msi` |
 | Linux | [`packaging/linux/`](packaging/linux/) | `build-linux.sh` | `.deb` + `.AppImage` |
 

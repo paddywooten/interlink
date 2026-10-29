@@ -18,6 +18,10 @@ The script checks the WebKitGTK toolchain, runs `npm install`, runs
 | `InterLink_*.deb` | Debian / Ubuntu — double-click, your package manager takes over |
 | `InterLink_*.AppImage` | any distro — `chmod +x` once, then it just runs (`libfuse2` needed to launch) |
 
+The `.deb` installs `/usr/bin/interlink`, an **InterLink** menu entry and the
+app icons under `/usr/share/icons/hicolor/`; uninstall with
+`sudo apt remove inter-link`.
+
 ## Prerequisites (one-time)
 
 Toolchain: rustup (`~/.cargo`) + Node 20+ (`~/.local/node` or your distro's).

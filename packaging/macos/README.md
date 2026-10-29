@@ -1,17 +1,30 @@
 # macOS setup & build
 
 Everything macOS-specific is grouped in this folder. **One double-click of
-[`build-dmg.sh`](build-dmg.sh) produces a `.dmg`.**
+[`build-dmg.command`](build-dmg.command) produces a `.dmg`.**
 
 ```bash
-# from Finder: right-click build-dmg.sh → Open (macOS asks once)
-# from a terminal:
+# from Finder: double-click build-dmg.command
+# from a terminal (either file):
+./packaging/macos/build-dmg.command
 ./packaging/macos/build-dmg.sh
 ```
 
-The script checks the toolchain, runs `npm install`, runs
+It checks the toolchain, runs `npm install`, runs
 `npm run tauri build -- --bundles dmg`, and drops `InterLink_*.dmg` in
 `packaging/macos/out/`, opening that folder when it finishes.
+
+Finder can't run a `.sh` — double-clicking one just opens it in an editor — so
+`build-dmg.command` is a two-line shim that hands over to `build-dmg.sh`, the
+real script. Double-click the `.command`; use the `.sh` from a terminal or when
+you want to read what runs.
+
+If macOS refuses to open it ("unidentified developer"), right-click →
+**Open** once, or clear the quarantine flag:
+
+```bash
+xattr -d com.apple.quarantine packaging/macos/build-dmg.command
+```
 
 ## Prerequisites (one-time)
 
@@ -37,7 +50,9 @@ Open the `.dmg` and drag **InterLink** into `Applications`.
   server + UDP discovery) behind this prompt. **Deny → phone connects and
   retries forever.** Grant it: System Settings → Privacy & Security →
   Local Network → InterLink.
-- Notifications on macOS are not bridged yet (Linux/Windows only in the MVP).
+- Notifications are mirrored as native macOS popups, like the other two desktop
+  OSes — the first one asks macOS for permission. If you dismissed that prompt,
+  enable InterLink under System Settings → Notifications, or nothing will pop.
 
 ### Signing / notarization
 
