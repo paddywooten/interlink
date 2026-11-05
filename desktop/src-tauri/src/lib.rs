@@ -5,6 +5,7 @@ mod backup;
 mod commands;
 mod connection;
 mod crypto;
+mod pair;
 mod popup;
 mod protocol;
 mod server;
@@ -83,6 +84,8 @@ pub fn run() {
             commands::get_devices,
             commands::get_pairing_qr,
             commands::unpair,
+            commands::pair_mode,
+            commands::pair_decide,
             commands::send_request,
             commands::media_thumb,
             commands::media_download,

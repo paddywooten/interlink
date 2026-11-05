@@ -19,6 +19,12 @@ export const getStatus = () => invoke<Status>("get_status");
 export const getPairingQr = (rotate = false) =>
   invoke<{ qr: string; rotated: boolean }>("get_pairing_qr", { rotate });
 export const unpair = () => invoke("unpair");
+/** Allow (or stop allowing) approve-to-pair requests from unpaired phones. */
+export const pairMode = (enabled: boolean) =>
+  invoke<{ enabled: boolean }>("pair_mode", { enabled });
+/** Approve or reject a pending pair request by its id. */
+export const pairDecide = (id: string, approve: boolean) =>
+  invoke<{ ok: boolean }>("pair_decide", { id, approve });
 export const listAudioInputs = () =>
   invoke<{ devices: AudioDevice[] }>("list_audio_inputs");
 export const getSettings = () => invoke<Record<string, unknown>>("get_settings");
@@ -210,7 +216,7 @@ export const clipGet = () => req<{ text: string; ts: number }>("clip.get").catch
 // ——— Events ———
 
 export interface EvPayload {
-  kind: "conn" | "push" | "progress" | "devices";
+  kind: "conn" | "push" | "progress" | "devices" | "pair";
   data: any;
 }
 

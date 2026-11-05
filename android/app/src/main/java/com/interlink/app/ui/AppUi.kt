@@ -144,7 +144,8 @@ fun HomeScreen(prefs: Prefs, modifier: Modifier = Modifier) {
                         LinkState.CONNECTED -> "Connected (${statusDetail ?: "laptop"})"
                         LinkState.CONNECTING, LinkState.HANDSHAKING -> "Connecting…"
                         LinkState.DISCONNECTED -> when {
-                            statusDetail == "unpaired" -> "Not paired — scan the QR on your laptop"
+                            statusDetail == "unpaired" ->
+                                "Not paired — scan the QR, or use Pair → Approve"
                             statusDetail?.contains("re-scan") == true ||
                                 statusDetail?.contains("keys differ") == true ->
                                 "Pairing problem: $statusDetail"

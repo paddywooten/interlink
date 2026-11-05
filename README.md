@@ -47,6 +47,10 @@ Two components, one encrypted protocol:
   tray (toggle in Settings)
 - 📦 Remote app install — push an `.apk` from the laptop; the phone shows its
   normal install confirmation and you tap Install on the phone
+- 🔗 Pair by approval — no camera needed: with the laptop's Pair dialog open,
+  pick the laptop on the phone's **Approve** tab and confirm that both screens
+  show the same six digits. The pairing secret is only ever sent sealed under a
+  key from that exchange, never in the clear
 - 💾 Backup & restore — contacts, SMS and every photo/video into a plain folder
   you can open and read, and back onto any phone
 - 🔊 Ring my phone, live battery percentage, device info
@@ -55,6 +59,8 @@ Two components, one encrypted protocol:
 ## How it works
 
 1. **Pair:** the laptop shows a QR code (LAN address + 32-byte secret); the phone scans it once.
+   No camera? Open the laptop's Pair dialog, choose the laptop on the phone's
+   **Approve** tab, and confirm the same six-digit code on both screens.
 2. **Connect:** the phone (foreground service) keeps an encrypted WebSocket connection to the laptop over the local network. Traffic is end-to-end encrypted (XChaCha20-Poly1305, key derived from the pairing secret — see [PROTOCOL.md](PROTOCOL.md)).
 3. **Use:** open the laptop app — messages, notifications, gallery and calls are live.
 
@@ -144,7 +150,9 @@ cd android
 
 ## Security model
 
-- Pairing secret: 32 random bytes, transferred only via QR code (in-person).
+- Pairing secret: 32 random bytes. It reaches the phone via the QR code, or —
+  with approve-to-pair — sealed under an ephemeral P-256 ECDH key after both
+  screens showed the same six-digit code. It is never sent in the clear.
 - Per-connection session key via handshake; every frame sealed with XChaCha20-Poly1305.
 - No cloud, no accounts — local network only.
 - Unpairing from either side wipes the stored secret.

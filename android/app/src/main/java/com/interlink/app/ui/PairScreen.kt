@@ -15,6 +15,7 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +29,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -38,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -47,9 +50,16 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import com.interlink.app.core.LanDevice
+import com.interlink.app.core.LanDiscovery
+import com.interlink.app.core.PairSession
 import com.interlink.app.core.Prefs
 import com.interlink.app.service.LinkService
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
 private const val TAG = "PairScan"
@@ -75,6 +85,13 @@ fun PairScreen(prefs: Prefs, onPaired: () -> Unit, modifier: Modifier = Modifier
     }
     var status by remember { mutableStateOf("Point the camera at the QR code shown on the laptop.") }
     var tab by remember { mutableIntStateOf(0) }
+    val discovered by LanDiscovery.devices.collectAsState()
+
+    // Approve-to-pair state — see the "Approve" tab below.
+    var pairTarget by remember { mutableStateOf<String?>(null) }
+    var pairCode by remember { mutableStateOf<String?>(null) }
+    var pairError by remember { mutableStateOf<String?>(null) }
+    var pairJob by remember { mutableStateOf<Job?>(null) }
 
     val camLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -97,6 +114,46 @@ fun PairScreen(prefs: Prefs, onPaired: () -> Unit, modifier: Modifier = Modifier
         return true
     }
 
+    /**
+     * Approve-to-pair: ask the laptop, show the code the laptop will also show,
+     * and wait for the sealed secret. Nothing is saved until the grant decrypts,
+     * which only happens if both screens carried the same six digits.
+     */
+    fun pairNearby(host: String, port: Int, label: String) {
+        if (pairJob?.isActive == true) return
+        pairError = null
+        pairCode = null
+        pairTarget = label
+        pairJob = scope.launch {
+            try {
+                val cfg = prefs.snapshot()
+                val grant = PairSession.pair(host, port, cfg.deviceName) { code ->
+                    withContext(Dispatchers.Main) { pairCode = code }
+                }
+                // Prefer the address that just worked. The grant's LAN IP is a
+                // better stored endpoint only when we came in over loopback
+                // (adb reverse), where that IP may still work without the cable.
+                val saveHost = if (host == "127.0.0.1" || host == "localhost") {
+                    grant.ip ?: host
+                } else {
+                    host
+                }
+                prefs.savePairing(grant.secretStdB64, saveHost, grant.port)
+                status = "Paired with ${grant.name} — starting link…"
+                LinkService.start(context)
+                onPaired()
+            } catch (e: CancellationException) {
+                status = "Pairing cancelled."
+            } catch (e: Exception) {
+                Log.w(TAG, "approve-to-pair failed", e)
+                pairError = e.message ?: "Pairing failed."
+            } finally {
+                pairTarget = null
+                pairCode = null
+            }
+        }
+    }
+
     Column(
         modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -106,13 +163,27 @@ fun PairScreen(prefs: Prefs, onPaired: () -> Unit, modifier: Modifier = Modifier
         TabRow(selectedTabIndex = tab) {
             Tab(
                 selected = tab == 0,
-                onClick = { tab = 0 },
+                onClick = {
+                    tab = 0
+                    status = "Point the camera at the QR code shown on the laptop."
+                },
                 text = { Text("Scan QR") },
             )
             Tab(
                 selected = tab == 1,
-                onClick = { tab = 1 },
+                onClick = {
+                    tab = 1
+                    status = "Paste the pairing code from the laptop, or enter its IP."
+                },
                 text = { Text("Enter code") },
+            )
+            Tab(
+                selected = tab == 2,
+                onClick = {
+                    tab = 2
+                    status = "Ask a laptop to pair — open its Pair dialog first."
+                },
+                text = { Text("Approve") },
             )
         }
         Text(status, style = MaterialTheme.typography.bodyMedium)
@@ -150,6 +221,15 @@ fun PairScreen(prefs: Prefs, onPaired: () -> Unit, modifier: Modifier = Modifier
                 }
             }
             1 -> ManualPairTab(::pairWith) // fallback: paste code / enter Wi-Fi IP
+            2 -> PairNearbyTab(
+                devices = discovered.filter { it.role == "laptop" },
+                waitingOn = pairTarget,
+                code = pairCode,
+                error = pairError,
+                onPick = { d -> pairNearby(d.ip, d.port, d.name) },
+                onManual = { host, port -> pairNearby(host, port, host) },
+                onCancel = { pairJob?.cancel() },
+            )
         }
     }
 }
@@ -189,6 +269,120 @@ private fun ManualPairTab(pairWith: (rawText: String, hostOverride: String) -> B
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+/**
+ * Ask a discovered laptop to pair. The laptop must have its Pair dialog open,
+ * and it shows the same six digits before anyone presses Approve there.
+ */
+@Composable
+private fun PairNearbyTab(
+    devices: List<LanDevice>,
+    waitingOn: String?,
+    code: String?,
+    error: String?,
+    onPick: (LanDevice) -> Unit,
+    onManual: (String, Int) -> Unit,
+    onCancel: () -> Unit,
+) {
+    var ip by remember { mutableStateOf("") }
+    var port by remember { mutableStateOf("27341") }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (waitingOn != null) {
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Pairing with $waitingOn", style = MaterialTheme.typography.titleSmall)
+                    if (code != null) {
+                        Text(
+                            "Check that the laptop shows the same six digits:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "${code.take(3)} ${code.drop(3)}",
+                            style = MaterialTheme.typography.displaySmall,
+                            fontWeight = FontWeight.Bold,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Text(
+                            "Then press Approve on the laptop. Nothing is saved until you do.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        Text("Asking the laptop…", style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (error != null) {
+                        Text(error, color = MaterialTheme.colorScheme.error)
+                    }
+                    OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                        Text("Cancel")
+                    }
+                }
+            }
+        } else {
+            Text(
+                "Ask a laptop to pair without scanning the QR code. Both devices must be " +
+                    "on the same network.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (devices.isEmpty()) {
+                Text(
+                    "No laptop seen yet. Open the laptop app and its Pair dialog, and keep " +
+                        "this screen open for a few seconds.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            for (device in devices) {
+                Card(Modifier.fillMaxWidth()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(14.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(device.name, style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "${device.ip}:${device.port}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Button(onClick = { onPick(device) }) { Text("Ask to pair") }
+                    }
+                }
+            }
+
+            OutlinedTextField(
+                value = ip,
+                onValueChange = { ip = it },
+                label = { Text("Laptop IP (if not listed)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = port,
+                onValueChange = { port = it.filter(Char::isDigit) },
+                label = { Text("Port") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Button(
+                onClick = { onManual(ip.trim(), port.toIntOrNull() ?: 27341) },
+                enabled = ip.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Ask this laptop to pair")
+            }
+            if (error != null) {
+                Text(error, color = MaterialTheme.colorScheme.error)
+            }
+        }
     }
 }
 

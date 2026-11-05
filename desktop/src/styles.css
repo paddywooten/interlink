@@ -671,6 +671,26 @@ nav {
   color: var(--fg2);
 }
 
+.pair-card {
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-top: 14px;
+  display: grid;
+  gap: 10px;
+}
+
+.pair-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 34px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  text-align: center;
+  padding: 6px 0;
+  color: var(--fg);
+}
+
 .modal-actions {
   display: flex;
   justify-content: space-between;

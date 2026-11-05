@@ -51,6 +51,7 @@ The QR code must be rendered **dark modules on a light background** — phone
 scanners cannot decode inverted (light-on-dark) codes.
 
 Stored on both sides after successful pairing. Rotating the secret unpairs both sides.
+A laptop that has no secret yet creates one when it approves a request (§2.5).
 
 ### 2.2 Keys
 
@@ -86,6 +87,54 @@ Cipher: **XChaCha20-Poly1305** (random 24-byte nonce per frame).
 bytes (from the control message) have arrived, then reports completion with the
 `file.done`/`transfer.done` pushes (§4.4). Chunks must arrive in order — a `seq`
 gap aborts the transfer (WebSocket is ordered; the check is a safety net).
+
+### 2.5 Approve-to-pair (pairing without the QR code)
+
+The QR path (§2.1) never puts `S` on the wire. Approve-to-pair lets the phone ask
+a laptop it can already reach, and still keeps `S` off the wire in the clear.
+
+The exchange uses **ephemeral P-256 ECDH** and runs on the laptop's normal
+WebSocket port, before any session exists. Its first frames are therefore
+**plaintext JSON envelopes sent as binary WebSocket messages** — they have no
+`0x01` kind byte. The laptop tells the flows apart by the first byte: a sealed
+hello starts with `0x01`, `pair.begin` starts with `{`.
+
+Precondition: the laptop's Pair dialog is open. Otherwise every `pair.begin` is
+refused with `pairing_closed`, so an unpaired LAN client cannot raise approval
+prompts whenever it likes.
+
+1. Phone → laptop (plaintext):
+   `{v:1, t:"pair.begin", id, d:{device:{name, os}, pub:<b64url 65B SEC1>, nonce:<b64url 32B>}}`
+2. Laptop → phone (plaintext):
+   `{v:1, t:"pair.challenge", id, d:{pub:<b64url 65B SEC1>, nonce:<b64url 32B>, device:{name, app}}}`
+3. Both compute `Z` (P-256 ECDH) and derive:
+
+   ```
+   transcript = SHA-256("interlink-v1-pair" ‖ phone_pub ‖ laptop_pub
+                                           ‖ phone_nonce ‖ laptop_nonce)
+   code       = HKDF-SHA256(Z, salt=transcript, info="pair-sas",   len=4) mod 10^6
+   grant_key  = HKDF-SHA256(Z, salt=transcript, info="pair-grant", len=32)
+   ```
+
+   `code` is shown zero-padded to six digits on **both** screens. Both sides put
+   the phone's point and nonce first, whatever their own role.
+
+4. If the digits match, the user presses **Approve** on the laptop. Laptop → phone:
+   **frame kind `0x01`**, sealed under `grant_key`, containing
+   `{secret:<standard b64 32B>, port, ip?, device:{name, app}}`.
+5. The phone decrypts, stores the secret, and reconnects with the normal
+   root-key handshake (§2.3).
+
+Refusals are plaintext `{t:"pair.reject", d:{reason, detail?}}` with `reason` one
+of `pairing_closed`, `bad_request`, `bad_key` or `denied`. The request also
+expires after 120 seconds. The socket is closed after either answer.
+
+Why the six digits: `ws://` is unauthenticated, so an attacker on the LAN can
+terminate one ECDH exchange with the phone and another with the laptop. They then
+hold two different `Z` values, hence two different codes. Comparing the screens is
+what turns an anonymous key exchange into an authenticated one; a man in the
+middle cannot make the two displays agree (1-in-a-million chance). The secret
+itself only ever appears inside the sealed grant.
 
 ## 3. JSON envelope (kind `0x01`)
 
@@ -125,6 +174,9 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 | `hello_ack` | L→P | `{nonce, device:{name, os, app}, caps:[…]}` | root-key sealed |
 | `ping` / `pong` | ↔ | `{battery?:{level,charging}, screen?:bool}` | 15 s interval |
 | `unpair` | ↔ | `{}` | wipes stored secret on receiver, closes |
+
+`pair.begin` / `pair.challenge` / `pair.reject` happen **before** a session exists
+and are plaintext JSON frames, not kind-`0x01` envelopes — see §2.5.
 
 ### 4.2 Notifications
 

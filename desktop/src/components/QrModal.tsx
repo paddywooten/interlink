@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import QRCode from "qrcode";
-import { getPairingQr, unpair } from "../api";
-import { setState, toast, useStore } from "../store";
+import { getPairingQr, onEvent, pairDecide, pairMode, unpair } from "../api";
+import { getState, setState, toast, useStore } from "../store";
+
+interface PairRequest {
+  id: string;
+  device: string;
+  code: string;
+}
 
 export default function QrModal() {
   const open = useStore((s) => s.qrModal);
@@ -9,6 +15,7 @@ export default function QrModal() {
   const [qr, setQr] = useState<string | null>(null);
   const [raw, setRaw] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [request, setRequest] = useState<PairRequest | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -16,10 +23,38 @@ export default function QrModal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  // Pairing mode is exactly "this dialog is open". Requests that arrive while
+  // it is closed are refused by the backend, so a stray LAN client cannot pop
+  // approval prompts at will.
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    let unlisten: (() => void) | undefined;
+    pairMode(true).catch(() => undefined);
+    onEvent((ev) => {
+      if (!alive || ev.kind !== "pair") return;
+      setRequest(ev.data.request ?? null);
+    }).then((u) => {
+      if (alive) unlisten = u;
+      else u();
+    });
+    return () => {
+      alive = false;
+      unlisten?.();
+      setRequest(null);
+      pairMode(false).catch(() => undefined);
+    };
+  }, [open]);
+
   const load = async (rotate: boolean) => {
     setBusy(true);
     try {
       const r = await getPairingQr(rotate);
+      // Re-assert pairing mode once the async work is done: a StrictMode
+      // mount/unmount pair can otherwise leave the flag off after the second
+      // effect wins the race. Check the live store in case the dialog has been
+      // closed while this request was in flight.
+      if (getState().qrModal) pairMode(true).catch(() => undefined);
       // NOTE: modules MUST be dark-on-light — phone scanners (zxing) cannot
       // decode inverted (light-on-dark) QR codes.
       const dataUrl = await QRCode.toDataURL(r.qr, {
@@ -51,8 +86,47 @@ export default function QrModal() {
         </div>
         <p className="muted">
           Open <b>InterLink on your phone</b> → <b>Scan QR</b>, and point it at this code.
+          Or pick <b>Approve</b> on the phone and confirm the six digits shown here.
           Both devices must be on the same network.
         </p>
+        {request && (
+          <div className="pair-card">
+            <p className="muted">
+              <b>{request.device}</b> wants to pair. The code on the phone must read
+              exactly:
+            </p>
+            <div className="pair-code" aria-label={`pairing code ${request.code}`}>
+              {request.code.slice(0, 3)} {request.code.slice(3)}
+            </div>
+            <p className="muted" style={{ fontSize: 12 }}>
+              Approve only if the phone shows the same six digits. If they differ,
+              someone is interfering with the connection — reject.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="btn ghost"
+                onClick={async () => {
+                  const id = request.id;
+                  setRequest(null);
+                  await pairDecide(id, false).catch(() => undefined);
+                }}
+              >
+                Reject
+              </button>
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  const id = request.id;
+                  setRequest(null);
+                  await pairDecide(id, true).catch(() => undefined);
+                  toast("Pairing approved — waiting for the phone…", "info");
+                }}
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        )}
         <div className="qr-box">
           {qr ? <img src={qr} alt="pairing QR" /> : <div className="qr-loading">Generating…</div>}
         </div>

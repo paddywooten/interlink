@@ -104,6 +104,25 @@ pub async fn unpair(state: State<'_, SharedState>) -> Result<Value, String> {
     Ok(json!({ "ok": true }))
 }
 
+/// Open or close pairing mode. While open, an unpaired phone on the LAN may ask
+/// to pair; while closed such a request is refused outright. Closing the dialog
+/// also cancels a pending request so the phone is told "no" instead of waiting.
+#[tauri::command]
+pub async fn pair_mode(state: State<'_, SharedState>, enabled: bool) -> Result<Value, String> {
+    state.set_pair_mode(enabled).await;
+    Ok(json!({ "enabled": enabled }))
+}
+
+/// The user's answer to a pending approve-to-pair request.
+#[tauri::command]
+pub async fn pair_decide(
+    state: State<'_, SharedState>,
+    id: String,
+    approve: bool,
+) -> Result<Value, String> {
+    Ok(json!({ "ok": state.decide_pair(&id, approve).await }))
+}
+
 /// Generic request → the phone. Frontend uses this for most protocol messages.
 #[tauri::command]
 pub async fn send_request(

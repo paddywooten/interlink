@@ -7,9 +7,15 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub const DEFAULT_PORT: u16 = 27341;
+
+/// How long an approve-to-pair request waits for the user's decision. Long
+/// enough to read six digits and compare them, short enough that a phone whose
+/// request was ignored is not left hanging on a dead socket forever.
+pub const PAIR_DECISION_TIMEOUT: Duration = Duration::from_secs(120);
 /// UDP port for LAN device-presence beacons (kept separate from the connect
 /// path on DEFAULT_PORT so discovery never disturbs an active pairing).
 pub const BEACON_PORT: u16 = 27342;
@@ -163,6 +169,14 @@ pub struct Outgoing {
     pub done: bool,
 }
 
+/// A phone that asked to pair and is waiting for the user to compare the code
+/// and decide. Only one can be pending at a time: two simultaneous requests
+/// would mean two modals with two codes and no way to tell them apart.
+pub struct PendingPair {
+    pub id: String,
+    pub tx: oneshot::Sender<bool>,
+}
+
 /// One screen-mirror frame as it crosses the laptop: frame counter + JPEG.
 ///
 /// `None` seeds a fresh [mirror channel](tokio::sync::watch::channel) so a
@@ -203,6 +217,12 @@ pub struct Inner {
     /// key, oldest first. The push itself carries only a flag — see
     /// [crate::server::take_notif_image].
     pub notif_images: VecDeque<(String, Vec<u8>)>,
+    /// True while the Pair dialog is open. Approve-to-pair is only accepted
+    /// then: an unpaired socket that asks at any other time is refused, so a
+    /// stray LAN client cannot pop approval dialogs at will.
+    pub pair_mode: bool,
+    /// The request currently waiting for the user's decision.
+    pub pending_pair: Option<PendingPair>,
 }
 
 pub struct AppState {
@@ -242,6 +262,8 @@ impl AppState {
                 adb_device: None,
                 waiters: HashMap::new(),
                 notif_images: VecDeque::new(),
+                pair_mode: false,
+                pending_pair: None,
                 mirror_tx: None,
                 mirror_audio: None,
             }),
@@ -281,6 +303,119 @@ impl AppState {
                 .ok()
                 .filter(|v| v.len() == 32)
         })
+    }
+
+    /// The pairing secret, creating one if this laptop has never had one.
+    ///
+    /// Approve-to-pair hands out exactly what the QR dialog shows, so the
+    /// secret has to exist before the grant frame can be sealed.
+    pub async fn ensure_secret(&self) -> [u8; 32] {
+        use base64::Engine;
+        let secret = {
+            // Check-and-create under one lock: two approved requests must not
+            // race into generating two different secrets.
+            let mut inner = self.inner.lock().await;
+            let existing = inner
+                .cfg
+                .secret_b64
+                .as_ref()
+                .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+                .filter(|v| v.len() == 32);
+            match existing {
+                Some(bytes) => {
+                    let mut out = [0u8; 32];
+                    out.copy_from_slice(&bytes);
+                    return out;
+                }
+                None => {
+                    let fresh = crate::crypto::random_bytes32();
+                    inner.cfg.secret_b64 =
+                        Some(base64::engine::general_purpose::STANDARD.encode(fresh));
+                    fresh
+                }
+            }
+        };
+        self.save_config().await;
+        secret
+    }
+
+    /// Is the Pair dialog open — i.e. may an unpaired phone ask to pair?
+    pub async fn pairing_open(&self) -> bool {
+        self.inner.lock().await.pair_mode
+    }
+
+    /// Open or close pairing mode. Closing withdraws a pending request so the
+    /// phone that asked gets an answer instead of hanging until it times out.
+    pub async fn set_pair_mode(&self, enabled: bool) {
+        let pending = {
+            let mut inner = self.inner.lock().await;
+            inner.pair_mode = enabled;
+            if enabled { None } else { inner.pending_pair.take() }
+        };
+        if let Some(p) = pending {
+            let _ = p.tx.send(false);
+            self.emit("pair", serde_json::json!({ "request": Value::Null }));
+        }
+    }
+
+    /// Show a pending request to the UI and wait for the user's decision.
+    ///
+    /// False when another request is already pending, when pairing mode is
+    /// switched off meanwhile, or when the user takes too long — in every one
+    /// of those cases the phone must be told "no" rather than left waiting.
+    pub async fn ask_pair(&self, device: String, code: String) -> bool {
+        let id = crate::protocol::new_id();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut inner = self.inner.lock().await;
+            if inner.pending_pair.is_some() {
+                return false;
+            }
+            inner.pending_pair = Some(PendingPair { id: id.clone(), tx });
+        }
+        self.emit(
+            "pair",
+            serde_json::json!({
+                "request": { "id": id, "device": device, "code": code }
+            }),
+        );
+
+        let approve = matches!(
+            tokio::time::timeout(PAIR_DECISION_TIMEOUT, rx).await,
+            Ok(Ok(true))
+        );
+
+        // Whatever happened — approved, denied, timed out, dialog closed — the
+        // slot must end up empty, or no phone could ever ask again.
+        let withdrew = {
+            let mut inner = self.inner.lock().await;
+            let mine = inner.pending_pair.as_ref().is_some_and(|p| p.id == id);
+            if mine {
+                inner.pending_pair.take();
+            }
+            mine
+        };
+        if withdrew {
+            self.emit("pair", serde_json::json!({ "request": Value::Null }));
+        }
+        approve
+    }
+
+    /// The user's answer from the UI. False means the request was already gone
+    /// (timed out, cancelled, or from a stale dialog).
+    pub async fn decide_pair(&self, id: &str, approve: bool) -> bool {
+        let tx = {
+            let mut inner = self.inner.lock().await;
+            let mine = inner.pending_pair.as_ref().is_some_and(|p| p.id == id);
+            if mine { inner.pending_pair.take().map(|p| p.tx) } else { None }
+        };
+        match tx {
+            Some(tx) => {
+                let _ = tx.send(approve);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Send a raw frame to the connected phone. Returns false when offline.

@@ -151,16 +151,188 @@ async fn beacon_service(state: SharedState, link_port: u16) {
     }
 }
 
-async fn handle_connection(
+/// Approve-to-pair: `pair.begin` → challenge → user compares codes → sealed
+/// grant.
+///
+/// The first two frames are plaintext because the two sides have no shared key
+/// yet — establishing one *is* this exchange. The grant is the only frame that
+/// carries the pairing secret, and it is sealed under a key derived from
+/// ephemeral P-256 ECDH. Both sides display six digits derived from that same
+/// key exchange, so a man in the middle cannot make the two displays agree.
+///
+/// The socket is closed once the answer is sent either way: the phone stores
+/// the secret and reconnects through the normal root-key handshake, which
+/// keeps every post-pairing frame on exactly the path already tested.
+async fn pair_handshake(
     ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    state: SharedState,
+    peer_addr: std::net::SocketAddr,
+    begin: Envelope,
+) {
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+
+    let (mut tx, _rx) = ws.split();
+
+    // Only while the Pair dialog is open. Without this gate any unpaired LAN
+    // client could pop approval prompts on the laptop whenever it liked.
+    if !state.pairing_open().await {
+        log::warn!("pair.begin from {peer_addr} while the Pair dialog is closed");
+        let _ = tx
+            .send(Message::Binary(
+                json_frame(
+                    "pair.reject",
+                    json!({ "reason": "pairing_closed",
+                            "detail": "Open the Pair dialog on the laptop first." }),
+                )
+                .into(),
+            ))
+            .await;
+        return;
+    }
+
+    let device = begin.d["device"]["name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Phone")
+        .to_string();
+    let phone_pub = URL_SAFE_NO_PAD
+        .decode(begin.d["pub"].as_str().unwrap_or_default())
+        .unwrap_or_default();
+    let phone_nonce = URL_SAFE_NO_PAD
+        .decode(begin.d["nonce"].as_str().unwrap_or_default())
+        .unwrap_or_default();
+    if phone_pub.len() != 65 || phone_nonce.len() != 32 {
+        log::warn!("malformed pair.begin from {peer_addr}");
+        let _ = tx
+            .send(Message::Binary(
+                json_frame("pair.reject", json!({ "reason": "bad_request" })).into(),
+            ))
+            .await;
+        return;
+    }
+
+    let laptop = crate::pair::Session::new();
+    let (laptop_pub, laptop_nonce) = (laptop.pubkey().to_vec(), *laptop.nonce());
+    let device_name = state.inner.lock().await.cfg.device_name.clone();
+    let challenge = json_frame(
+        "pair.challenge",
+        json!({
+            "pub": URL_SAFE_NO_PAD.encode(&laptop_pub),
+            "nonce": URL_SAFE_NO_PAD.encode(laptop_nonce),
+            "device": { "name": device_name, "app": "InterLink Laptop" },
+        }),
+    );
+    if tx.send(Message::Binary(challenge.into())).await.is_err() {
+        return;
+    }
+
+    let finished = match laptop.finish(crate::pair::Role::Laptop, &phone_pub, &phone_nonce) {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("pair handshake failed from {peer_addr}: {e}");
+            let _ = tx
+                .send(Message::Binary(
+                    json_frame("pair.reject", json!({ "reason": "bad_key" })).into(),
+                ))
+                .await;
+            return;
+        }
+    };
+
+    log::info!(
+        "pair request from {} at {peer_addr} — code {}",
+        device,
+        finished.code
+    );
+    if !state.ask_pair(device.clone(), finished.code.clone()).await {
+        log::info!("pair request from {device} denied");
+        let _ = tx
+            .send(Message::Binary(
+                json_frame(
+                    "pair.reject",
+                    json!({ "reason": "denied",
+                            "detail": "Not approved on the laptop, or the code did not match." }),
+                )
+                .into(),
+            ))
+            .await;
+        return;
+    }
+
+    // The secret is handed over only after the user confirmed the code, and
+    // only inside a frame sealed by the exchange those digits authenticated.
+    let secret = state.ensure_secret().await;
+    let (port, name) = {
+        let inner = state.inner.lock().await;
+        (inner.cfg.port, inner.cfg.device_name.clone())
+    };
+    let grant = json!({
+        "secret": STANDARD.encode(secret),
+        "port": port,
+        "ip": crate::state::local_ip(),
+        "device": { "name": name, "app": "InterLink Laptop" },
+    });
+    let sealed = finished
+        .key
+        .seal_msg(&serde_json::to_vec(&grant).expect("grant serializes"));
+    if tx.send(Message::Binary(sealed.into())).await.is_ok() {
+        let _ = tx.send(Message::Close(None)).await;
+        log::info!("paired {device} ({}) at {peer_addr}", finished.code);
+    }
+}
+
+/// A plaintext protocol envelope, used only before a session key exists.
+fn json_frame(t: &str, d: Value) -> Vec<u8> {
+    serde_json::to_vec(&Envelope {
+        v: 1,
+        t: t.into(),
+        id: crate::protocol::new_id(),
+        r: None,
+        ok: None,
+        e: None,
+        d,
+    })
+    .unwrap_or_default()
+}
+
+async fn handle_connection(
+    mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     state: SharedState,
     app: tauri::AppHandle,
     peer_addr: std::net::SocketAddr,
 ) {
+    // ——— Read the first frame before anything else ———
+    // Two flows share this port. A paired phone opens with a root-key-sealed
+    // hello, which always starts with KIND_MSG (0x01). An unpaired phone asking
+    // to pair has no shared key yet, so it opens with plaintext JSON (starts
+    // with '{'). The byte decides which flow runs; see pair_handshake.
+    let first = match tokio::time::timeout(IDLE_TIMEOUT, ws.next()).await {
+        Ok(Some(Ok(Message::Binary(b)))) => b.to_vec(),
+        Ok(Some(Ok(_))) => {
+            log::warn!("non-binary first frame from {peer_addr}");
+            return;
+        }
+        _ => {
+            log::warn!("no hello frame from {peer_addr}");
+            return;
+        }
+    };
+
+    if first.first() != Some(&crypto::KIND_MSG) {
+        match serde_json::from_slice::<Envelope>(&first) {
+            Ok(env) if env.t == "pair.begin" => {
+                pair_handshake(ws, state, peer_addr, env).await;
+            }
+            _ => log::warn!("expected a sealed hello or pair.begin from {peer_addr}"),
+        }
+        return;
+    }
+
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(128);
 
-    // ——— Handshake: first frame must be root-key-sealed hello ———
+    // ——— Handshake: the hello must decrypt under the root key ———
     let secret = match state.config_secret().await {
         Some(s) => s,
         None => {
@@ -175,13 +347,6 @@ async fn handle_connection(
     };
     let root = crypto::frame_key(crypto::derive_root_key(&secret));
 
-    let first = match tokio::time::timeout(IDLE_TIMEOUT, ws_rx.next()).await {
-        Ok(Some(Ok(Message::Binary(b)))) => b,
-        _ => {
-            log::warn!("no hello frame from {peer_addr}");
-            return;
-        }
-    };
     let hello_pt = match root.open_msg(first.as_ref()) {
         Ok(p) => p,
         Err(_) => {
