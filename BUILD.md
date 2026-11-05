@@ -26,6 +26,13 @@ and leaves the installer in `packaging/<os>/out/`, opening the folder when it
 finishes. Prerequisites, firewall rules, signing and OS permission notes live in
 the README beside each script.
 
+On Linux the `.deb` adds the **InterLink** menu entry by itself, but an
+`.AppImage` does not register with the desktop — after closing the window the
+app looks like it vanished. Run
+[`packaging/linux/install-linux.sh`](packaging/linux/install-linux.sh) once
+(no root needed) to copy the AppImage into `~/.local/bin` and add the menu and
+desktop icons; `--uninstall` removes them again.
+
 Running it by hand, from `desktop/`:
 
 ```bash

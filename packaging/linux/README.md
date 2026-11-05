@@ -22,6 +22,24 @@ The `.deb` installs `/usr/bin/interlink`, an **InterLink** menu entry and the
 app icons under `/usr/share/icons/hicolor/`; uninstall with
 `sudo apt remove inter-link`.
 
+## Menu / desktop icon for the AppImage
+
+An AppImage is a single file and does **not** register itself with the desktop,
+so after you close the window there is nothing to click. Install it for your
+account once (no root):
+
+```bash
+./packaging/linux/install-linux.sh
+```
+
+It copies the newest `out/*.AppImage` to `~/.local/bin/InterLink.AppImage`,
+writes `~/.local/share/applications/interlink.desktop`, installs the icons, and
+adds a desktop shortcut when `~/Desktop` exists. Use `--no-desktop-shortcut` to
+skip the shortcut, pass an explicit AppImage path as the argument, or run
+`./packaging/linux/install-linux.sh --uninstall` to remove the launcher.
+
+The `.deb` path needs no extra step — its menu entry is part of the package.
+
 ## Prerequisites (one-time)
 
 Toolchain: rustup (`~/.cargo`) + Node 20+ (`~/.local/node` or your distro's).

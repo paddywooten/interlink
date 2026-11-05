@@ -85,6 +85,10 @@ Install:  double-click the .deb (Debian/Ubuntu, opens in your package manager)
           or the .AppImage (any distro — make it executable first:
           chmod +x InterLink*.AppImage, and install libfuse2 to run it).
 
+AppImage icon: an AppImage does not add itself to the app menu. Run
+          ./packaging/linux/install-linux.sh once (no root) to get an
+          InterLink icon you can click after closing the window.
+
 The firewall still has to allow TCP/UDP 27341 and UDP 27342 or the phone will
 never reach the laptop — see packaging/linux/README.md.
 NOTE
