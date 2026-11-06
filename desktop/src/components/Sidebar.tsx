@@ -12,9 +12,9 @@ const items = [
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
-/** Phone battery, if it has reported one (see device.battery). */
+/** Phone battery, if it has reported one (see device.battery). Level is 0–100. */
 function Battery({ level, charging }: { level: number; charging?: boolean }) {
-  const pct = Math.round(Math.max(0, Math.min(1, level)) * 100);
+  const pct = Math.round(Math.max(0, Math.min(100, level)));
   const cls = pct <= 15 ? "crit" : pct <= 30 ? "low" : "";
   return (
     <div className="battery" title={`Phone battery ${pct}%`}>

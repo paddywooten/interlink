@@ -1,4 +1,5 @@
 export interface Battery {
+  /** Integer percentage, 0–100 (the phone reports what Android shows). */
   level: number;
   charging?: boolean;
   temp?: number;

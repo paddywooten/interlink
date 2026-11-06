@@ -172,7 +172,7 @@ Legend: `P→L` phone pushes to laptop, `L→P` laptop sends, `LR` = laptop requ
 |---|---|---|---|
 | `hello` | P→L | `{nonce, device:{name, model, os, app}, caps?}` | first frame, root-key sealed |
 | `hello_ack` | L→P | `{nonce, device:{name, os, app}, caps:[…]}` | root-key sealed |
-| `ping` / `pong` | ↔ | `{battery?:{level,charging}, screen?:bool}` | 15 s interval |
+| `ping` / `pong` | ↔ | `{battery?:{level,charging}, screen?:bool}` | 15 s interval; `level` is 0–100 |
 | `unpair` | ↔ | `{}` | wipes stored secret on receiver, closes |
 
 `pair.begin` / `pair.challenge` / `pair.reject` happen **before** a session exists
@@ -344,7 +344,7 @@ the laptop's call page silently becomes useless and nobody knows why.
 | type | dir | payload `d` |
 |---|---|---|
 | `device.ring` | L→P | `{seconds ≤ 30}` — phone plays loud find-me alarm |
-| `device.battery` | P→L push | `{level, charging, temp?}` (also piggybacked on `pong`). Pushed **on connect and then every 30 s**, so the laptop shows a live percentage without polling |
+| `device.battery` | P→L push | `{level, charging, temp?}` (also piggybacked on `pong`). `level` is an integer percentage 0–100, `temp` is °C. Pushed **on connect and then every 30 s**, so the laptop shows a live percentage without polling |
 | `device.info` | LR | → `{name, model, os, app, ip, storage?:{total,free}}` |
 | `find.phone` | L→P | alias of `device.ring` with vibrate+flash best effort |
 

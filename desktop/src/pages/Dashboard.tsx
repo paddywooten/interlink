@@ -74,7 +74,7 @@ export default function Dashboard() {
                     <span className="stat-k">Battery</span>
                     <span className="stat-v">
                       {status.battery
-                        ? `${Math.round(status.battery.level * 100)}%${status.battery.charging ? " ⚡" : ""}`
+                        ? `${Math.round(status.battery.level)}%${status.battery.charging ? " ⚡" : ""}`
                         : "—"}
                     </span>
                   </div>

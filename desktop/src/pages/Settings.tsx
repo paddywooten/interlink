@@ -517,7 +517,7 @@ export default function Settings() {
                 <span className="muted">battery</span>
                 <span className="mono">
                   {status?.battery
-                    ? `${Math.round(status.battery.level * 100)}%${status.battery.charging ? " (charging)" : ""}`
+                    ? `${Math.round(status.battery.level)}%${status.battery.charging ? " (charging)" : ""}`
                     : "—"}
                 </span>
               </div>
