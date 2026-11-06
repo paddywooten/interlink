@@ -87,7 +87,9 @@ interlink/
 │   ├── src/         # React/TS UI
 │   └── src-tauri/   # Rust: server, encryption, audio, tray
 ├── android/         # Kotlin Android app
-└── packaging/       # one-click installers, one folder per OS
+├── InterLink-Setup-Windows/   # double-click BUILD-WINDOWS.bat → .msi
+├── InterLink-Setup-Linux/     # double-click build-linux.sh  → .deb + .AppImage
+└── packaging/       # the build scripts + per-OS detail notes
     ├── macos/       #   build-dmg.sh      → .dmg
     ├── windows/     #   build-msi.bat     → .msi
     └── linux/       #   build-linux.sh    → .deb + .AppImage
@@ -95,9 +97,11 @@ interlink/
 
 ## Development setup
 
-> **Building an installer?** Each desktop OS has a folder in
-> [`packaging/`](packaging/) with a script you can double-click — it checks the
-> toolchain, builds, and leaves the installer in `packaging/<os>/out/`.
+> **Building an installer?** Double-click the script in
+> [`InterLink-Setup-Windows/`](InterLink-Setup-Windows/) or
+> [`InterLink-Setup-Linux/`](InterLink-Setup-Linux/) — it checks the toolchain,
+> builds, and leaves the installer in `packaging/<os>/out/`. The detailed
+> per-OS folders are in [`packaging/`](packaging/).
 >
 > **Developing?** See [BUILD.md](BUILD.md) for per-OS prerequisites, signing
 > notes and the firewall/permission checklist, plus the README beside each

@@ -11,8 +11,21 @@ The wire protocol is identical on every OS — see `PROTOCOL.md`.
 
 ## One-click installers
 
-Each desktop OS is grouped into its own folder holding the build script and
-every note that belongs to that platform:
+If you just want the obvious folder to click:
+
+| OS | Double-click this |
+|---|---|
+| Windows | [`InterLink-Setup-Windows/BUILD-WINDOWS.bat`](InterLink-Setup-Windows/BUILD-WINDOWS.bat) |
+| Linux | [`InterLink-Setup-Linux/build-linux.sh`](InterLink-Setup-Linux/build-linux.sh) |
+
+Those two folders hold the one-click entry point for each OS. The build logic
+and the detailed platform notes stay in `packaging/` (below), so there is only
+one copy of either script. On Linux, after building the AppImage, run
+[`InterLink-Setup-Linux/install-launcher.sh`](InterLink-Setup-Linux/install-launcher.sh)
+once to get the menu/desktop icon.
+
+Each desktop OS also has a detailed folder holding the build script and every
+note that belongs to that platform:
 
 | OS | Folder | Double-click | Produces |
 |---|---|---|---|
