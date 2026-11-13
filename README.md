@@ -15,7 +15,8 @@ Two components, one encrypted protocol:
 - 👥 Contacts — the whole address book on the laptop, searchable, tap to call
 - 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
   thumbnails, and in-app video that streams straight off the phone, so
-  scrubbing works without waiting for a copy
+  scrubbing works without waiting for a copy. **Drag a photo or video out of
+  the window** onto the desktop or a file manager to copy it to the laptop
 - 🎵 Music — the phone's whole song library, searchable by title, artist,
   album or genre and sortable by any of them (plus filename, date and size
   from a dropdown), with an always-on player: queue, seek, next/prev, ±10 s,

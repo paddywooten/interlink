@@ -37,6 +37,17 @@ rfd = "0.15"
 log = "0.4"
 env_logger = "0.11"
 
+# Native drag-out: an HTML dragstart cannot hand a real file to the OS from a
+# webview, so the drag command in commands.rs starts a native drag itself:
+# `drag` on Windows (OLE/DoDragDrop) and macOS (NSDraggingSession); directly
+# on GTK on Linux, because `drag` offers GTK's portal file-transfer targets,
+# which Plasma consumes on drag-enter and then fails to read at the drop.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+drag = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [profile.release]
 codegen-units = 1
 lto = true

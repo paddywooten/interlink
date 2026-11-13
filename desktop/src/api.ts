@@ -49,6 +49,15 @@ export const mediaDownload = (id: string, suggested?: string, subdir?: string) =
     subdir,
   });
 
+/** Drag a gallery item onto the desktop / a file manager.
+ *
+ * An HTML drag cannot hand a real file to the OS, so this downloads the item
+ * (unless `path` already points at a file from an earlier drag) and then
+ * starts a native drag from the window, which the user finishes by releasing
+ * the mouse over the drop target. */
+export const mediaDrag = (id: string, suggested?: string, path?: string) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean }>("media_drag", { id, suggested, path });
+
 /** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
  * the value lands in an SQL `ORDER BY`, so the phone only ever honours names
  * it recognises. */

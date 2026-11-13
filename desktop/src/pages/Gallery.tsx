@@ -24,8 +24,13 @@ export default function Gallery() {
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoLoading, setVideoLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [preparing, setPreparing] = useState<string | null>(null);
   const sentinel = useRef<HTMLDivElement>(null);
   const thumbTokens = useRef(0);
+  // Download dir path per item id, filled in by the first drag-out so later
+  // drags of the same item start instantly instead of fetching it again.
+  const draggedPaths = useRef<Record<string, string>>({});
+  const dragBusy = useRef(false);
 
   const fetchPage = useCallback(
     async (from: number, reset = false) => {
@@ -131,6 +136,33 @@ export default function Gallery() {
     }
   };
 
+  /** Hand a gallery item to the OS as a real file being dragged.
+   *
+   * The webview cannot do this itself: an HTML drag carries text/URLs only, so
+   * the pointer would drop a useless string. Instead the dragstart is
+   * cancelled and the backend downloads the item (the drop target needs a path
+   * that exists) and then takes over the pointer with a native drag, which
+   * ends when the user releases the mouse over a folder or the desktop. */
+  const dragOut = async (item: MediaItem) => {
+    // The webview re-fires dragstart for every tile the pointer crosses while
+    // the button is held; only the first gesture may start a drag.
+    if (dragBusy.current) return;
+    dragBusy.current = true;
+    setPreparing(item.id);
+    try {
+      const r = await api.mediaDrag(item.id, item.name, draggedPaths.current[item.id]);
+      if (r.path) draggedPaths.current[item.id] = r.path;
+    } catch (e) {
+      toast(String(e), "error");
+    } finally {
+      setPreparing(null);
+      // Hold the guard a little past the call: the native drag outlives it.
+      setTimeout(() => {
+        dragBusy.current = false;
+      }, 1500);
+    }
+  };
+
   const uploadFiles = async () => {
     try {
       const paths = await api.pickFiles();
@@ -180,7 +212,18 @@ export default function Gallery() {
           </div>
           <div className="grid-media">
             {items.map((m) => (
-              <div key={m.id} className="media-cell" onClick={() => openItem(m)}>
+              <div
+                key={m.id}
+                className={`media-cell ${preparing === m.id ? "preparing" : ""}`}
+                draggable
+                title="Drag this out to copy it to your desktop or a file manager"
+                onClick={() => openItem(m)}
+                onDragStart={(e) => {
+                  // Cancel the webview drag; the native one takes over.
+                  e.preventDefault();
+                  dragOut(m);
+                }}
+              >
                 {thumbs[m.id] ? (
                   <div className="media-thumb">
                     <img src={thumbs[m.id]} loading="lazy" alt={m.name} />
@@ -196,6 +239,7 @@ export default function Gallery() {
                   </div>
                 )}
                 <div className="media-size">{fmtSize(m.size)}</div>
+                {preparing === m.id && <div className="media-drag-overlay">Copying…</div>}
               </div>
             ))}
           </div>
@@ -248,7 +292,8 @@ export default function Gallery() {
 
       <div className="page-foot">
         <span className="muted">
-          Files land in <b>~/InterLink</b> — change the folder in Settings.
+          Drag a tile out of the window to copy it to your desktop or a file manager. Files also
+          land in <b>~/InterLink</b> — change the folder in Settings.
         </span>
       </div>
     </div>

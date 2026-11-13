@@ -89,6 +89,7 @@ pub fn run() {
             commands::send_request,
             commands::media_thumb,
             commands::media_download,
+            commands::media_drag,
             commands::media_stream_url,
             commands::file_send,
             commands::mirror_start,
