@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import * as api from "./api";
 import Sidebar from "./components/Sidebar";
 import Toasts from "./components/Toasts";
@@ -27,6 +26,22 @@ import {
   useStore,
 } from "./store";
 
+/** Browser build: a system notification for phone events while the tab is in
+ * the background. The desktop app has native popups for this (popup.rs). */
+function browserNotify(title: string, body: string) {
+  if (!api.isWeb || !("Notification" in window)) return;
+  if (Notification.permission !== "granted" || !document.hidden) return;
+  try {
+    const n = new Notification(title, { body, icon: "/icon.svg" });
+    n.onclick = () => {
+      window.focus();
+      n.close();
+    };
+  } catch {
+    /* some browsers only allow notifications from a service worker */
+  }
+}
+
 export default function App() {
   const page = useStore((s) => s.page);
   const connected = useStore((s) => s.connected);
@@ -37,6 +52,19 @@ export default function App() {
   // Same for the in-call bar, which stands down on Calls (the page's own
   // call card already carries these controls).
   const inCall = useStore((s) => s.call !== null && s.page !== "calls");
+
+  // Browsers only allow the notification prompt after a user gesture, so ask
+  // on the first click/tap rather than at load (which every browser blocks).
+  useEffect(() => {
+    if (!api.isWeb || !("Notification" in window)) return;
+    if (Notification.permission !== "default") return;
+    const ask = () => {
+      Notification.requestPermission().catch(() => undefined);
+      window.removeEventListener("pointerdown", ask);
+    };
+    window.addEventListener("pointerdown", ask);
+    return () => window.removeEventListener("pointerdown", ask);
+  }, []);
 
   // Initial status + event stream
   useEffect(() => {
@@ -99,11 +127,18 @@ export default function App() {
         switch (t) {
           case "notif.post":
             addNotification({ ...d, ts: Date.now() });
+            browserNotify(
+              d.title ?? d.app ?? "Phone",
+              d.text ?? d.body ?? "",
+            );
             break;
           case "notif.remove":
             removeNotification(d.key);
             break;
           case "call.state":
+            if (d.state === "incoming") {
+              browserNotify("Incoming call", `${d.name ?? d.number ?? "Unknown"} is calling`);
+            }
             setState({
               call: d.state === "ended" ? null : d,
               audioBroken: d.state === "ended" ? null : getState().audioBroken,
@@ -124,7 +159,7 @@ export default function App() {
             // Read the live slot — the effect below keeps it fresh; the `status`
             // closure above would be stale (mounted before the first refresh).
             if ((window as any).__il_status?.clipboardEnabled !== false) {
-              writeText(d.text ?? "").catch(() => undefined);
+              api.clipboardWrite(d.text ?? "").catch(() => undefined);
               toast("Clipboard copied from phone", "info");
             }
             break;

@@ -124,6 +124,17 @@ export default function Gallery() {
 
   const download = async () => {
     if (!lightbox) return;
+    // A browser downloads a URL; there is no laptop path to report back.
+    if (api.isWeb) {
+      const a = document.createElement("a");
+      a.href = api.mediaDownloadUrl(lightbox.id, lightbox.name);
+      a.download = lightbox.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast(`Downloading ${lightbox.name}…`, "info");
+      return;
+    }
     setSaving(true);
     try {
       const r = await api.mediaDownload(lightbox.id, lightbox.name);
@@ -215,10 +226,15 @@ export default function Gallery() {
               <div
                 key={m.id}
                 className={`media-cell ${preparing === m.id ? "preparing" : ""}`}
-                draggable
-                title="Drag this out to copy it to your desktop or a file manager"
+                draggable={!api.isWeb}
+                title={
+                  api.isWeb
+                    ? "Open to download this to your computer"
+                    : "Drag this out to copy it to your desktop or a file manager"
+                }
                 onClick={() => openItem(m)}
                 onDragStart={(e) => {
+                  if (api.isWeb) return; // the browser's own drag/download is fine
                   // Cancel the webview drag; the native one takes over.
                   e.preventDefault();
                   dragOut(m);
@@ -292,8 +308,17 @@ export default function Gallery() {
 
       <div className="page-foot">
         <span className="muted">
-          Drag a tile out of the window to copy it to your desktop or a file manager. Files also
-          land in <b>~/InterLink</b> — change the folder in Settings.
+          {api.isWeb ? (
+            <>
+              Open a photo or video and choose <b>Save to laptop</b> to download it with your
+              browser.
+            </>
+          ) : (
+            <>
+              Drag a tile out of the window to copy it to your desktop or a file manager. Files
+              also land in <b>~/InterLink</b> — change the folder in Settings.
+            </>
+          )}
         </span>
       </div>
     </div>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { revealInFolder } from "../api";
+import { canReveal, revealInFolder } from "../api";
 import * as api from "../api";
 import { setState, toast, useStore } from "../store";
 
@@ -194,9 +194,11 @@ export default function Dashboard() {
             {recent.map((f) => (
               <div key={f.path + f.when} className="recent-row">
                 <span className="mono">{f.name}</span>
-                <button className="btn tiny ghost" onClick={() => revealInFolder(f.path)}>
-                  Show
-                </button>
+                {canReveal && (
+                  <button className="btn tiny ghost" onClick={() => revealInFolder(f.path)}>
+                    Show
+                  </button>
+                )}
               </div>
             ))}
           </div>

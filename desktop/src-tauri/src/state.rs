@@ -240,7 +240,14 @@ pub struct AppState {
     /// "started"/"stopped" pushes and a local `mirror_stop` can land close
     /// together, and each half of that pair must see the other's work.
     pub mirror_audio_gate: tokio::sync::Mutex<()>,
+    /// Native-popup hook. The desktop app installs one so phone events surface
+    /// with its window minimised; the web build leaves it empty and the browser
+    /// raises its own notifications from the same events.
+    popup_hook: std::sync::OnceLock<PopupHook>,
 }
+
+/// Called with a push type and payload for events worth a native popup.
+pub type PopupHook = Box<dyn Fn(&str, &Value) + Send + Sync>;
 
 impl AppState {
     pub fn new(cfg_path: PathBuf) -> Arc<Self> {
@@ -268,7 +275,20 @@ impl AppState {
                 mirror_audio: None,
             }),
             events,
+            popup_hook: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Install the native-popup hook (once; later calls are ignored).
+    pub fn set_popup_hook(&self, hook: PopupHook) {
+        let _ = self.popup_hook.set(hook);
+    }
+
+    /// Offer a push to the native-popup hook, if there is one.
+    pub fn popup(&self, t: &str, d: &Value) {
+        if let Some(hook) = self.popup_hook.get() {
+            hook(t, d);
+        }
     }
 
     pub async fn save_config(&self) {
@@ -542,34 +562,27 @@ impl AppState {
     /// one value — the newest — so a laptop that can't quite keep up shows a
     /// stuttering but live image instead of a smooth one that is seconds
     /// behind.
-    pub async fn mirror_sink(
-        &self,
-        app: &tauri::AppHandle,
-    ) -> tokio::sync::watch::Sender<MirrorFrame> {
+    pub async fn mirror_sink(&self) -> tokio::sync::watch::Sender<MirrorFrame> {
         if let Some(tx) = self.inner.lock().await.mirror_tx.clone() {
             return tx;
         }
 
         let (tx, rx) = tokio::sync::watch::channel::<MirrorFrame>(None);
-        let handle = app.clone();
-        tauri::async_runtime::spawn(async move {
+        let events = self.events.clone();
+        tokio::spawn(async move {
             pump_mirror_frames(rx, |seq, jpeg| {
                 use base64::Engine as _;
-                use tauri::Emitter;
-                let _ = handle.emit(
-                    "il:ev",
-                    serde_json::json!({
-                        "kind": "push",
-                        "data": {
-                            "t": "mirror.frame",
-                            "d": {
-                                "seq": seq,
-                                "mime": "image/jpeg",
-                                "data": base64::engine::general_purpose::STANDARD.encode(&jpeg),
-                            }
+                let _ = events.send(serde_json::json!({
+                    "kind": "push",
+                    "data": {
+                        "t": "mirror.frame",
+                        "d": {
+                            "seq": seq,
+                            "mime": "image/jpeg",
+                            "data": base64::engine::general_purpose::STANDARD.encode(&jpeg),
                         }
-                    }),
-                );
+                    }
+                }));
             })
             .await;
             // Sender dropped (mirror stopped, or the link went away) — the

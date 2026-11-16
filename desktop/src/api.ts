@@ -1,5 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   AudioDevice,
   CallEntry,
@@ -12,6 +13,46 @@ import type {
   SmsThread,
   Status,
 } from "./types";
+
+// ——— Transport ———
+//
+// The same UI runs in two places. In the desktop app it talks to the Rust
+// backend through Tauri's `invoke` and event channel. In a browser it talks to
+// `interlink-web` (the same backend, served over HTTP): commands are
+// `POST /api/<name>` with the same JSON arguments, and events arrive as
+// Server-Sent Events. Everything below this block is transport-agnostic.
+
+/** True when running as a web page rather than inside the Tauri window. */
+export const isWeb = typeof window === "undefined" || !("__TAURI_INTERNALS__" in window);
+
+/** Failures are plain strings in both transports (Tauri rejects with one). */
+async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isWeb) return tauriInvoke<T>(cmd, args);
+  let res: Response;
+  try {
+    res = await fetch(`/api/${cmd}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(args ?? {}),
+    });
+  } catch {
+    throw "offline: cannot reach InterLink web — is interlink-web still running?";
+  }
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw "Session expired — open the link printed by interlink-web again.";
+    }
+    throw (body && body.error) || `HTTP ${res.status}`;
+  }
+  return body as T;
+}
+
+/** Copy text to the clipboard (Tauri plugin, or the browser's own API). */
+export async function clipboardWrite(text: string): Promise<void> {
+  if (!isWeb) return writeText(text);
+  await navigator.clipboard.writeText(text);
+}
 
 // ——— Commands ———
 
@@ -33,11 +74,18 @@ export const getDevices = () =>
 export const setSettings = (patch: Record<string, unknown>) =>
   invoke<Record<string, unknown>>("set_settings", { patch });
 export const pickDirectory = () =>
-  invoke<{ path: string | null }>("pick_directory");
+  isWeb
+    ? Promise.resolve({ path: webAskFolder("Folder on this computer to save files into:") })
+    : invoke<{ path: string | null }>("pick_directory");
 export const pickFiles = () =>
-  invoke<{ paths: string[] }>("pick_files").then((r) => r.paths);
+  isWeb ? webPickFiles() : invoke<{ paths: string[] }>("pick_files").then((r) => r.paths);
+/** Showing a file in the OS file manager only exists in the desktop app. */
+export const canReveal = !isWeb;
 export const revealInFolder = (path: string) =>
-  invoke("reveal_in_folder", { path });
+  isWeb ? Promise.resolve() : invoke("reveal_in_folder", { path });
+/** A phone photo/video as a normal browser download (web build only). */
+export const mediaDownloadUrl = (id: string, name?: string) =>
+  `/api/media/file?id=${encodeURIComponent(id)}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
 export const mediaThumb = (id: string, w = 320) =>
   invoke<{ data: string; mime: string }>("media_thumb", { id, w });
 /** Save a photo/video from the phone onto the laptop. Playback deliberately
@@ -131,7 +179,9 @@ export const connectionRefresh = () =>
 
 // ——— Remote app install ———
 export const pickApk = () =>
-  invoke<{ path: string | null }>("pick_apk").then((r) => r.path);
+  isWeb
+    ? webPickFiles(".apk", false).then((p) => p[0] ?? null)
+    : invoke<{ path: string | null }>("pick_apk").then((r) => r.path);
 
 // ——— Backup / restore ———
 export const backupStart = (sections: string[], outDir?: string) =>
@@ -157,7 +207,9 @@ export const backupList = (dir: string) =>
     media: number;
   }>("backup_list", { dir });
 export const pickBackupDir = () =>
-  invoke<{ path: string | null }>("pick_backup_dir").then((r) => r.path);
+  isWeb
+    ? Promise.resolve(webAskFolder("Backup folder on this computer:"))
+    : invoke<{ path: string | null }>("pick_backup_dir").then((r) => r.path);
 
 /** Generic protocol request to the phone. Resolves with the response payload. */
 export async function req<T = unknown>(
@@ -229,8 +281,75 @@ export interface EvPayload {
   data: any;
 }
 
-export async function onEvent(cb: (ev: EvPayload) => void) {
-  return listen<EvPayload>("il:ev", (e) => cb(e.payload));
+export async function onEvent(cb: (ev: EvPayload) => void): Promise<() => void> {
+  if (!isWeb) return listen<EvPayload>("il:ev", (e) => cb(e.payload));
+
+  // Browser: Server-Sent Events. EventSource reconnects by itself; if the
+  // connection was lost, whatever happened meanwhile was missed, so re-read
+  // everything with a reload rather than show stale state.
+  const es = new EventSource("/api/events");
+  let wasDown = false;
+  es.onmessage = (m) => {
+    try {
+      cb(JSON.parse(m.data) as EvPayload);
+    } catch {
+      /* ignore a malformed frame */
+    }
+  };
+  es.onerror = () => {
+    wasDown = true;
+  };
+  es.onopen = () => {
+    if (wasDown) window.location.reload();
+  };
+  return () => es.close();
+}
+
+// ——— Browser-only helpers ———
+
+/** The browser has no folder picker that yields a path on the machine running
+ * InterLink, so ask for one. Empty / cancelled → null. */
+function webAskFolder(question: string): string | null {
+  const v = window.prompt(question);
+  return v && v.trim() ? v.trim() : null;
+}
+
+/** The browser's file picker. The bytes go to the machine running InterLink
+ * (`PUT /api/upload`), and the paths that come back are what `fileSend` /
+ * the APK installer then read from disk, exactly like a native dialog's. */
+function webPickFiles(accept?: string, multiple = true): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.multiple = multiple;
+    if (accept) input.accept = accept;
+    input.style.display = "none";
+    const done = (fn: () => void) => {
+      input.remove();
+      fn();
+    };
+    input.addEventListener("cancel", () => done(() => resolve([])));
+    input.addEventListener("change", async () => {
+      const files = Array.from(input.files ?? []);
+      try {
+        const paths: string[] = [];
+        for (const f of files) {
+          const res = await fetch(`/api/upload?name=${encodeURIComponent(f.name)}`, {
+            method: "PUT",
+            body: f,
+          });
+          const body = await res.json().catch(() => null);
+          if (!res.ok) throw (body && body.error) || `upload failed (HTTP ${res.status})`;
+          paths.push(body.path as string);
+        }
+        done(() => resolve(paths));
+      } catch (e) {
+        done(() => reject(e));
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
+  });
 }
 
 export type { CallState };

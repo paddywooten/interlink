@@ -15,7 +15,7 @@ const PING_INTERVAL: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Start the TCP listener + UDP discovery responder. Returns after binding.
-pub async fn start(state: SharedState, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn start(state: SharedState) -> Result<(), String> {
     let port = { state.inner.lock().await.cfg.port };
     let listener = TcpListener::bind(("0.0.0.0", port))
         .await
@@ -34,11 +34,10 @@ pub async fn start(state: SharedState, app: tauri::AppHandle) -> Result<(), Stri
                 Ok((stream, peer_addr)) => {
                     log::info!("incoming connection from {peer_addr}");
                     let st = state.clone();
-                    let app = app.clone();
                     tokio::spawn(async move {
                         let ws = tokio_tungstenite::accept_async(stream).await;
                         match ws {
-                            Ok(ws) => handle_connection(ws, st, app, peer_addr).await,
+                            Ok(ws) => handle_connection(ws, st, peer_addr).await,
                             Err(e) => log::warn!("websocket handshake failed: {e}"),
                         }
                     });
@@ -299,7 +298,6 @@ fn json_frame(t: &str, d: Value) -> Vec<u8> {
 async fn handle_connection(
     mut ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     state: SharedState,
-    app: tauri::AppHandle,
     peer_addr: std::net::SocketAddr,
 ) {
     // ——— Read the first frame before anything else ———
@@ -385,7 +383,7 @@ async fn handle_connection(
         e: None,
         d: json!({
             "nonce": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&server_nonce),
-            "device": { "name": state.inner.lock().await.cfg.device_name.clone(), "os": "linux", "app": "InterLink Laptop" },
+            "device": { "name": state.inner.lock().await.cfg.device_name.clone(), "os": std::env::consts::OS, "app": "InterLink Laptop" },
             "caps": ["notifications", "clipboard", "files", "calls", "ui"],
         }),
     };
@@ -511,7 +509,7 @@ async fn handle_connection(
                     Ok(e) => e,
                     Err(_) => continue,
                 };
-                dispatch_envelope(&state, &app, env).await;
+                dispatch_envelope(&state, env).await;
             }
             Some(crate::crypto::KIND_DATA) => {
                 match session_key.open_data(&frame) {
@@ -526,7 +524,7 @@ async fn handle_connection(
                         if tid == crate::crypto::mirror_tid() {
                             // Latest frame wins rather than queueing — see
                             // AppState::mirror_sink.
-                            let _ = state.mirror_sink(&app).await.send(Some((seq, chunk)));
+                            let _ = state.mirror_sink().await.send(Some((seq, chunk)));
                         } else {
                             let collector =
                                 { state.inner.lock().await.data_collectors.get(&tid).cloned() };
@@ -561,7 +559,7 @@ async fn handle_connection(
 
 /// Handle an inbound envelope from the phone: a response to one of our
 /// requests, a phone request needing a reply, or a push for the webview.
-async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Envelope) {
+async fn dispatch_envelope(state: &SharedState, env: Envelope) {
     // 1. Response to one of our requests? (`r` correlates it.)
     if env.is_response() {
         let rid = env.r.clone().unwrap_or_default();
@@ -593,7 +591,7 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
     // 2. Requests from the phone that need a reply.
     match env.t.as_str() {
         "file.offer" => {
-            handle_inbound_file_offer(state, app, env).await;
+            handle_inbound_file_offer(state, env).await;
             return;
         }
         "ping" => {
@@ -702,7 +700,7 @@ async fn dispatch_envelope(state: &SharedState, app: &tauri::AppHandle, env: Env
     }
     // Raise a native popup too, so the event is still surfaced with the
     // window minimised to the tray (the in-app list alone would be missed).
-    crate::popup::maybe_show(state, app, &t, &d).await;
+    state.popup(&t, &d);
     // Every push, at debug: without this line there is no way to tell a
     // phone that stopped sending from a laptop that stopped listening.
     log::debug!("push {t}: {d}");
@@ -741,7 +739,7 @@ fn basename(path: &str) -> String {
         .to_string()
 }
 
-async fn handle_inbound_file_offer(state: &SharedState, _app: &tauri::AppHandle, env: Envelope) {
+async fn handle_inbound_file_offer(state: &SharedState, env: Envelope) {
     let tid_b64 = env.d["tid"].as_str().unwrap_or("").to_string();
     use base64::Engine;
     let tid_raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -867,8 +865,12 @@ pub async fn assemble_incoming(
 }
 
 pub fn default_download_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join("InterLink")
+    // HOME on Linux/macOS, USERPROFILE on Windows (which has no HOME).
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    home.join("InterLink")
 }
 
 pub fn unique_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {

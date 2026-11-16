@@ -81,6 +81,63 @@ jobs:
             desktop/src-tauri/target/release/bundle/**/*
           if-no-files-found: error
 
+  web:
+    # The browser version: one executable per OS that serves the UI to any
+    # browser (no GTK/WebKit/WebView2 needed). Same backend as the desktop app.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: setup rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: linux build deps (ALSA for call audio)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev build-essential
+
+      - name: install frontend deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: frontend typecheck + build
+        working-directory: desktop
+        run: npm run build
+
+      - name: rust tests (web features)
+        working-directory: desktop/src-tauri
+        run: cargo test --no-default-features --features web --lib
+
+      - name: build interlink-web
+        working-directory: desktop/src-tauri
+        run: cargo build --release --no-default-features --features web --bin interlink-web
+
+      - name: upload interlink-web
+        uses: actions/upload-artifact@v4
+        with:
+          name: interlink-web-${{ matrix.platform }}
+          path: |
+            desktop/src-tauri/target/release/interlink-web
+            desktop/src-tauri/target/release/interlink-web.exe
+          if-no-files-found: error
+
   android:
     runs-on: ubuntu-latest
     steps:

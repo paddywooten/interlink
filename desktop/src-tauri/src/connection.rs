@@ -155,13 +155,18 @@ pub async fn tick(state: &SharedState) {
 /// Keep the tunnel alive (device replug, adb restart) and notice newly
 /// plugged-in phones in auto mode.
 ///
-/// Must go through Tauri's runtime: `setup()` runs on the main thread, outside
-/// any Tokio runtime, so a bare `tokio::spawn` would panic.
+/// In the desktop app this must go through Tauri's runtime: `setup()` runs on
+/// the main thread, outside any Tokio runtime, so a bare `tokio::spawn` would
+/// panic. The web binary already runs inside one.
 pub fn spawn(state: SharedState) {
-    tauri::async_runtime::spawn(async move {
+    let task = async move {
         loop {
             tick(&state).await;
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
-    });
+    };
+    #[cfg(feature = "desktop")]
+    tauri::async_runtime::spawn(task);
+    #[cfg(not(feature = "desktop"))]
+    tokio::spawn(task);
 }

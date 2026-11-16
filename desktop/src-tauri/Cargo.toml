@@ -9,15 +9,51 @@ edition = "2021"
 name = "interlink_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Two front ends over one backend (pairing, protocol, transfers, call audio):
+#   desktop (default) — the Tauri window app, `interlink`.
+#   web               — `interlink-web`, a headless binary that serves the same
+#                       UI to a browser on any OS (see src/web.rs, WEB.md).
+# Build the web one with: --no-default-features --features web
+[features]
+default = ["desktop"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-opener",
+    "dep:tauri-plugin-clipboard-manager",
+    "dep:tauri-plugin-notification",
+    "dep:rfd",
+    "dep:drag",
+    "dep:gtk",
+]
+web = [
+    "dep:axum",
+    "dep:rust-embed",
+    "dep:mime_guess",
+    "dep:tokio-util",
+    "dep:dirs",
+    "dep:webbrowser",
+]
+
+[[bin]]
+name = "interlink"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "interlink-web"
+path = "src/bin/interlink-web.rs"
+required-features = ["web"]
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
-tauri-plugin-opener = "2"
-tauri-plugin-clipboard-manager = "2"
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-clipboard-manager = { version = "2", optional = true }
 # Native popups so phone events still surface with the window minimised.
-tauri-plugin-notification = "2"
+tauri-plugin-notification = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -33,9 +69,17 @@ p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] 
 base64 = "0.22"
 cpal = "0.15"
 thiserror = "2"
-rfd = "0.15"
+rfd = { version = "0.15", optional = true }
 log = "0.4"
 env_logger = "0.11"
+
+# Web front end only.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"], optional = true }
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+dirs = { version = "6", optional = true }
+webbrowser = { version = "1", optional = true }
 
 # Native drag-out: an HTML dragstart cannot hand a real file to the OS from a
 # webview, so the drag command in commands.rs starts a native drag itself:
@@ -43,10 +87,10 @@ env_logger = "0.11"
 # on GTK on Linux, because `drag` offers GTK's portal file-transfer targets,
 # which Plasma consumes on drag-enter and then fails to read at the drop.
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-drag = "2"
+drag = { version = "2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-gtk = "0.18"
+gtk = { version = "0.18", optional = true }
 
 [profile.release]
 codegen-units = 1

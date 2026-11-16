@@ -7,11 +7,15 @@ use crate::server::{self, b64u};
 use crate::state::{Outgoing, SharedState};
 use base64::Engine;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+#[cfg(feature = "desktop")]
 use tauri::State;
+// The web build has no Tauri: a same-shaped wrapper lets the very same command
+// functions be called from its HTTP dispatcher.
+#[cfg(not(feature = "desktop"))]
+use crate::shim::State;
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> {
     let inner = state.inner.lock().await;
     let ip = crate::state::local_ip();
@@ -41,7 +45,7 @@ pub async fn get_status(state: State<'_, SharedState>) -> Result<Value, String> 
 }
 
 /// Devices discovered on the LAN via UDP beacons.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_devices(state: State<'_, SharedState>) -> Result<Value, String> {
     let inner = state.inner.lock().await;
     let mut list: Vec<crate::state::SeenDevice> =
@@ -53,7 +57,7 @@ pub async fn get_devices(state: State<'_, SharedState>) -> Result<Value, String>
 }
 
 /// Create (or rotate) the pairing QR code.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_pairing_qr(state: State<'_, SharedState>, rotate: Option<bool>) -> Result<Value, String> {
     // Embed the laptop's LAN IP so the phone can connect without UDP discovery.
     let ip = crate::state::local_ip();
@@ -89,7 +93,7 @@ pub async fn get_pairing_qr(state: State<'_, SharedState>, rotate: Option<bool>)
     Ok(json!({ "qr": qr, "rotated": rotated }))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn unpair(state: State<'_, SharedState>) -> Result<Value, String> {
     {
         let mut inner = state.inner.lock().await;
@@ -108,14 +112,14 @@ pub async fn unpair(state: State<'_, SharedState>) -> Result<Value, String> {
 /// Open or close pairing mode. While open, an unpaired phone on the LAN may ask
 /// to pair; while closed such a request is refused outright. Closing the dialog
 /// also cancels a pending request so the phone is told "no" instead of waiting.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pair_mode(state: State<'_, SharedState>, enabled: bool) -> Result<Value, String> {
     state.set_pair_mode(enabled).await;
     Ok(json!({ "enabled": enabled }))
 }
 
 /// The user's answer to a pending approve-to-pair request.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pair_decide(
     state: State<'_, SharedState>,
     id: String,
@@ -125,7 +129,7 @@ pub async fn pair_decide(
 }
 
 /// Generic request → the phone. Frontend uses this for most protocol messages.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn send_request(
     state: State<'_, SharedState>,
     t: String,
@@ -138,7 +142,7 @@ pub async fn send_request(
 }
 
 /// Fetch a media thumbnail as base64 JPEG. Laptop pre-registers the tid collector.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn media_thumb(state: State<'_, SharedState>, id: String, w: Option<u32>) -> Result<Value, String> {
     let tid = crypto::new_transfer_id();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(8);
@@ -171,30 +175,24 @@ pub async fn media_thumb(state: State<'_, SharedState>, id: String, w: Option<u3
 
 /// Download a photo/video from the phone into the InterLink folder.
 /// Returns the on-disk path so the UI can play videos through the asset URL.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn media_download(
     state: State<'_, SharedState>,
-    app: tauri::AppHandle,
     id: String,
     suggested: Option<String>,
     subdir: Option<String>,
 ) -> Result<Value, String> {
-    let _ = app;
     save_media(&state, id, suggested, subdir).await
 }
 
 /// Pull a media item onto the laptop's disk, returning its path.
 /// Shared by "Save to laptop" and by drag-out (the OS needs a real file).
-async fn save_media(
+pub async fn save_media(
     state: &SharedState,
     id: String,
     suggested: Option<String>,
     subdir: Option<String>,
 ) -> Result<Value, String> {
-    let tid = crypto::new_transfer_id();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
-    state.inner.lock().await.data_collectors.insert(tid, tx);
-
     let dl_dir = {
         let base = state.inner.lock().await.cfg.download_dir.clone();
         // `subdir` is internal (backup folders); keep it under the base dir.
@@ -208,6 +206,35 @@ async fn save_media(
             _ => base,
         }
     };
+    save_media_dir(state, id, suggested, dl_dir).await
+}
+
+/// Pull a media item into `dir` and return the file's path — used by the
+/// browser build to stage a phone photo/video before streaming it as a download.
+#[cfg(feature = "web")]
+pub async fn save_media_to(
+    state: &SharedState,
+    id: String,
+    suggested: Option<String>,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let saved = save_media_dir(state, id, suggested, Some(dir.display().to_string())).await?;
+    saved["path"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "internal: media path missing".to_string())
+}
+
+async fn save_media_dir(
+    state: &SharedState,
+    id: String,
+    suggested: Option<String>,
+    dl_dir: Option<String>,
+) -> Result<Value, String> {
+    let tid = crypto::new_transfer_id();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
+    state.inner.lock().await.data_collectors.insert(tid, tx);
+
     let tid_label = b64u(&tid);
     let result = async {
         let d = state
@@ -228,173 +255,6 @@ async fn save_media(
     result
 }
 
-/// Drag a gallery item out of the window, onto the desktop or a file manager.
-///
-/// A webview's HTML drag cannot hand a real file to the OS, so this downloads
-/// the item first (the OS drag needs a path that exists) and then starts a
-/// native drag from the app window. The drop target gets a copy; the file
-/// stays in the InterLink folder like "Save to laptop" would leave it.
-///
-/// `path` lets the UI reuse a file downloaded by an earlier drag in this
-/// session, so the second drag starts immediately instead of re-downloading.
-#[tauri::command]
-pub async fn media_drag(
-    state: State<'_, SharedState>,
-    app: tauri::AppHandle,
-    window: tauri::Window,
-    id: String,
-    suggested: Option<String>,
-    path: Option<String>,
-) -> Result<Value, String> {
-    // One drag at a time. While the button is held the webview keeps raising
-    // `dragstart` for every tile the pointer crosses; without this a single
-    // gesture would download and start a native drag for each of them.
-    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(json!({ "ok": false, "busy": true }));
-    }
-    let result = prepare_and_drag(&state, &app, window, id, suggested, path).await;
-    if result.is_err() {
-        DRAG_ACTIVE.store(false, Ordering::SeqCst);
-    }
-    result
-}
-
-/// Set while a drag-out is downloading or being dragged; cleared when the
-/// native drag ends (dropped or cancelled) or fails to start.
-static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-fn drag_finished() {
-    DRAG_ACTIVE.store(false, Ordering::SeqCst);
-}
-
-async fn prepare_and_drag(
-    state: &SharedState,
-    app: &tauri::AppHandle,
-    window: tauri::Window,
-    id: String,
-    suggested: Option<String>,
-    path: Option<String>,
-) -> Result<Value, String> {
-    let reused = match path {
-        Some(p) if std::path::Path::new(&p).is_file() => p,
-        _ => {
-            let saved = save_media(state, id, suggested, None).await?;
-            saved
-                .get("path")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .ok_or_else(|| "internal: media path missing".to_string())?
-        }
-    };
-
-    let file = std::path::PathBuf::from(&reused);
-    let icon: &'static [u8] = include_bytes!("../icons/128x128.png");
-
-    // GTK (and AppKit) must start the drag on the main thread; scheduling the
-    // drag here also keeps the async download off the UI thread.
-    app.run_on_main_thread(move || {
-        if let Err(e) = start_file_drag(&window, file, icon, drag_finished) {
-            log::warn!("native drag failed: {e}");
-            drag_finished();
-        }
-    })
-    .map_err(|e| format!("internal: could not reach the UI thread: {e}"))?;
-
-    // Safety net: if a platform never reports the drag ending, don't leave
-    // drag-out disabled for the rest of the session.
-    tauri::async_runtime::spawn(async {
-        tokio::time::sleep(Duration::from_secs(120)).await;
-        DRAG_ACTIVE.store(false, Ordering::SeqCst);
-    });
-
-    Ok(json!({ "ok": true, "path": reused }))
-}
-
-/// Start the OS drag for `file` from the app window (main thread only).
-/// `finished` runs once when the drag ends, whether dropped or cancelled.
-#[cfg(not(target_os = "linux"))]
-fn start_file_drag(
-    window: &tauri::Window,
-    file: std::path::PathBuf,
-    icon: &[u8],
-    finished: fn(),
-) -> Result<(), String> {
-    let on_drop = move |result: drag::DragResult, _pos: drag::CursorPosition| {
-        log::debug!("media drag finished: {result:?}");
-        finished();
-    };
-    drag::start_drag(
-        window,
-        drag::DragItem::Files(vec![file]),
-        drag::Image::Raw(icon.to_vec()),
-        on_drop,
-        drag::Options::default(),
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// GTK drag source offering only `text/uri-list`.
-///
-/// Not `drag::start_drag`: that calls `drag_source_add_uri_targets`, which on
-/// GTK >= 3.24.37 also advertises the FileTransfer-portal targets. Plasma
-/// reads those on drag-enter, which consumes the one-shot transfer, and then
-/// the real read at the drop fails with "Invalid transfer", so nothing lands.
-/// A plain uri-list is read the same way by Dolphin, the desktop and GTK file
-/// managers.
-#[cfg(target_os = "linux")]
-fn start_file_drag(
-    window: &tauri::Window,
-    file: std::path::PathBuf,
-    icon: &[u8],
-    finished: fn(),
-) -> Result<(), String> {
-    use gtk::gdk;
-    use gtk::prelude::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let win = window.gtk_window().map_err(|e| e.to_string())?;
-    let uri = gtk::gio::File::for_path(&file).uri().to_string();
-
-    let targets = [gtk::TargetEntry::new(
-        "text/uri-list",
-        gtk::TargetFlags::OTHER_APP,
-        0,
-    )];
-    let list = gtk::TargetList::new(&targets);
-    win.drag_source_set(gdk::ModifierType::BUTTON1_MASK, &targets, gdk::DragAction::COPY);
-
-    let ids: Rc<RefCell<Vec<gtk::glib::SignalHandlerId>>> = Rc::new(RefCell::new(Vec::new()));
-    ids.borrow_mut().push(win.connect_drag_data_get(move |_, _, data, _, _| {
-        log::debug!("media drag: handing over {uri} as {:?}", data.target().name());
-        data.set_uris(&[uri.as_str()]);
-    }));
-    {
-        let ids = ids.clone();
-        let win2 = win.clone();
-        ids.clone().borrow_mut().push(win.connect_drag_end(move |_, _| {
-            for id in ids.borrow_mut().drain(..) {
-                win2.disconnect(id);
-            }
-            win2.drag_source_unset();
-            log::debug!("media drag ended");
-            finished();
-        }));
-    }
-
-    let ctx = win
-        .drag_begin_with_coordinates(&list, gdk::DragAction::COPY, 1, None, -1, -1)
-        .ok_or_else(|| "could not start the drag".to_string())?;
-
-    let loader = gtk::gdk_pixbuf::PixbufLoader::new();
-    if loader.write(icon).is_ok() && loader.close().is_ok() {
-        if let Some(pixbuf) = loader.pixbuf() {
-            ctx.drag_set_icon_pixbuf(&pixbuf, 0, 0);
-        }
-    }
-    Ok(())
-}
-
 /// A URL the webview can put straight into `<audio>` / `<video>` and play.
 ///
 /// Playback used to mean "pull the whole file over, write it to disk, then
@@ -411,7 +271,7 @@ fn start_file_drag(
 /// This only assembles the URL: the port is a fixed constant and the token
 /// arrives over the already-encrypted link, so a stale or spoofed URL simply
 /// gets a 401 from the phone.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn media_stream_url(state: State<'_, SharedState>, id: String) -> Result<String, String> {
     // Prefer the tunnel whenever one is configured — the cable reaches the
     // phone even when the two sit on networks that cannot see each other,
@@ -470,7 +330,7 @@ fn pct(s: &str) -> String {
 /// dialog; on approval it streams JPEG frames as DATA frames on the fixed
 /// mirror tid, which server.rs forwards to the webview as `mirror.frame`
 /// pushes. Live state arrives via `mirror.state` pushes from the phone.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn mirror_start(
     state: State<'_, SharedState>,
     w: Option<u32>,
@@ -495,7 +355,7 @@ pub async fn mirror_start(
 /// the source of truth: it answers, then reports the real outcome (its
 /// capture rate, or why it can't) with a `mirror.audio` push that the server
 /// reacts to — see `audio::on_mirror_push`.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn mirror_audio(
     state: State<'_, SharedState>,
     on: bool,
@@ -510,7 +370,7 @@ pub async fn mirror_audio(
 }
 
 /// Stop screen mirroring (phone tears down the MediaProjection service).
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String> {
     let res = state.request_json("mirror.stop", json!({})).await;
     // Stop painting regardless of what the phone replied: no frames are
@@ -526,7 +386,7 @@ pub async fn mirror_stop(state: State<'_, SharedState>) -> Result<Value, String>
 /// to confirm it finished writing — callers (remote APK install, restore)
 /// rely on the file actually existing on the phone, not just having left the
 /// socket. `dest:"media"` restores straight into the photo/video library.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn file_send(
     state: State<'_, SharedState>,
     path: String,
@@ -645,7 +505,7 @@ fn guess_mime(name: &str) -> String {
     .to_string()
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_audio_inputs(state: State<'_, SharedState>) -> Result<Value, String> {
     let saved = state.inner.lock().await.cfg.mic_device.clone();
     Ok(json!({ "devices": with_saved(audio::list_inputs(), saved) }))
@@ -653,7 +513,7 @@ pub async fn list_audio_inputs(state: State<'_, SharedState>) -> Result<Value, S
 
 /// Output devices for the far end of a call (laptop speakers, Bluetooth
 /// speakers, HDMI, …) — the "Hear through" picker.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn list_audio_outputs(state: State<'_, SharedState>) -> Result<Value, String> {
     let saved = state.inner.lock().await.cfg.speaker_device.clone();
     Ok(json!({ "devices": with_saved(audio::list_outputs(), saved) }))
@@ -675,7 +535,7 @@ fn with_saved(mut devices: Vec<Value>, saved: Option<String>) -> Vec<Value> {
 ///
 /// `uplink` (speak through the laptop) and `downlink` (hear through the
 /// laptop) are independent; both false keeps the call entirely on the phone.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn call_audio_start(
     state: State<'_, SharedState>,
     call_id: String,
@@ -734,7 +594,7 @@ pub async fn call_audio_start(
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn call_audio_stop(state: State<'_, SharedState>, call_id: Option<String>) -> Result<Value, String> {
     // Same gate as `call_audio_start`: a stop must not slip in between another
     // start's "take old" and "store new" steps.
@@ -750,7 +610,7 @@ pub async fn call_audio_stop(state: State<'_, SharedState>, call_id: Option<Stri
     Ok(json!({ "ok": true }))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn call_mute(state: State<'_, SharedState>, muted: bool) -> Result<Value, String> {
     let inner = state.inner.lock().await;
     match inner.call_audio.as_ref() {
@@ -762,13 +622,13 @@ pub async fn call_mute(state: State<'_, SharedState>, muted: bool) -> Result<Val
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn get_settings(state: State<'_, SharedState>) -> Result<Value, String> {
     let inner = state.inner.lock().await;
     serde_json::to_value(&inner.cfg).map_err(|e| format!("internal: {e}"))
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result<Value, String> {
     let mut connection_changed = false;
     {
@@ -812,7 +672,7 @@ pub async fn set_settings(state: State<'_, SharedState>, patch: Value) -> Result
 }
 
 /// Re-scan for a USB device and re-apply the reverse tunnel on demand.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn connection_refresh(state: State<'_, SharedState>) -> Result<Value, String> {
     crate::connection::tick(&state).await;
     let inner = state.inner.lock().await;
@@ -828,7 +688,8 @@ pub async fn connection_refresh(state: State<'_, SharedState>) -> Result<Value, 
 }
 
 /// Pick an .apk to push to the phone (remote app install).
-#[tauri::command]
+#[cfg(feature = "desktop")]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pick_apk() -> Result<Value, String> {
     let file = rfd::AsyncFileDialog::new()
         .set_title("Choose an Android package")
@@ -843,7 +704,7 @@ pub async fn pick_apk() -> Result<Value, String> {
 
 /// Create a backup folder on this laptop: contacts (vCard), SMS (JSON) and
 /// every photo/video the phone will hand over.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn backup_start(
     state: State<'_, SharedState>,
     sections: Option<Vec<String>>,
@@ -855,19 +716,20 @@ pub async fn backup_start(
 }
 
 /// Replay a backup folder onto the phone.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn backup_restore(state: State<'_, SharedState>, dir: String) -> Result<Value, String> {
     crate::backup::restore(&state, dir).await
 }
 
 /// Describe a backup folder so the UI can show what a restore will restore.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn backup_list(dir: String) -> Result<Value, String> {
     crate::backup::list(dir).await
 }
 
 /// Pick a folder to back up into / restore from.
-#[tauri::command]
+#[cfg(feature = "desktop")]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pick_backup_dir() -> Result<Value, String> {
     let dir = rfd::AsyncFileDialog::new()
         .set_title("Choose a backup folder")
@@ -880,7 +742,8 @@ pub async fn pick_backup_dir() -> Result<Value, String> {
 }
 
 /// Pick a directory with a native dialog.
-#[tauri::command]
+#[cfg(feature = "desktop")]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pick_directory() -> Result<Value, String> {
     let dir = rfd::AsyncFileDialog::new()
         .set_title("Choose download folder")
@@ -893,7 +756,8 @@ pub async fn pick_directory() -> Result<Value, String> {
 }
 
 /// Pick files to send to the phone. Returns absolute paths.
-#[tauri::command]
+#[cfg(feature = "desktop")]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn pick_files() -> Result<Value, String> {
     let files = rfd::AsyncFileDialog::new()
         .set_title("Send files to phone")
@@ -906,7 +770,8 @@ pub async fn pick_files() -> Result<Value, String> {
 }
 
 /// Reveal a file in the system file manager.
-#[tauri::command]
+#[cfg(feature = "desktop")]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn reveal_in_folder(path: String) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
     if let Some(parent) = p.parent() {
@@ -919,15 +784,23 @@ pub async fn reveal_in_folder(path: String) -> Result<(), String> {
 }
 
 /// Open a URL/path with the system handler (bundled opener plugin fallback).
+#[cfg(feature = "desktop")]
 struct Opener;
+#[cfg(feature = "desktop")]
 impl Opener {
     fn open_path(p: String) {
-        let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+        #[cfg(target_os = "windows")]
+        let opener = "explorer";
+        #[cfg(target_os = "macos")]
+        let opener = "open";
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let opener = "xdg-open";
+        let _ = std::process::Command::new(opener).arg(&p).spawn();
     }
 }
 
 /// Base64 of a mirrored notification's attachment, for the in-app thumbnail.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn notif_image(state: State<'_, SharedState>, key: String) -> Result<Value, String> {
     let bytes = state
         .get_notif_image(&key)
@@ -945,7 +818,7 @@ pub async fn notif_image(state: State<'_, SharedState>, key: String) -> Result<V
 /// that arrives in a notification is usually one the user wants to keep, and
 /// on the phone it is already on its way out — apps cancel those notifications
 /// almost as soon as they show them.
-#[tauri::command]
+#[cfg_attr(feature = "desktop", tauri::command)]
 pub async fn notif_save_image(
     state: State<'_, SharedState>,
     key: String,

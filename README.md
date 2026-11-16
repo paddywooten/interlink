@@ -5,7 +5,8 @@ Two components, one encrypted protocol:
 
 | Component | Path | Stack |
 |---|---|---|
-| 🖥️ Laptop app (Windows / Linux) | `desktop/` | Tauri 2 (Rust) + React + TypeScript |
+| 🖥️ Laptop app (Windows / Linux / macOS) | `desktop/` | Tauri 2 (Rust) + React + TypeScript |
+| 🌐 Browser version (any OS) | `desktop/` (`--features web`) | Same Rust backend + React, served to a browser |
 | 📱 Phone app (Android) | `android/` | Kotlin + Jetpack Compose |
 
 ## Features
@@ -56,6 +57,10 @@ Two components, one encrypted protocol:
   you can open and read, and back onto any phone
 - 🔊 Ring my phone, live battery percentage, device info
 - 🌐 Nearby devices — see InterLink phones and laptops on the same Wi-Fi automatically
+- 🖥️ **Browser version** — the same app without a native window: run
+  `interlink-web` and the UI opens in any browser, on any OS. Same pairing,
+  messages, calls, mirroring and file transfers; see
+  [`packaging/web/README.md`](packaging/web/README.md)
 
 ## How it works
 

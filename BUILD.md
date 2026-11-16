@@ -5,6 +5,7 @@ InterLink has two halves:
 | Part | Tech | Runs on |
 |---|---|---|
 | Laptop app (`desktop/`) | Tauri 2 (Rust + React/TS) | Linux, **Windows**, **macOS** |
+| Browser version (`desktop/src-tauri`, `--features web`) | Same Rust backend + React UI, served to a browser | Any OS with a browser |
 | Phone app (`android/`) | Kotlin + Jetpack Compose | Android 8.0+ (minSdk 26) |
 
 The wire protocol is identical on every OS — see `PROTOCOL.md`.
@@ -17,6 +18,7 @@ If you just want the obvious folder to click:
 |---|---|
 | Windows | [`InterLink-Setup-Windows/BUILD-WINDOWS.bat`](InterLink-Setup-Windows/BUILD-WINDOWS.bat) |
 | Linux | [`InterLink-Setup-Linux/build-linux.sh`](InterLink-Setup-Linux/build-linux.sh) |
+| Browser version, any OS | [`InterLink-Setup-Web/build-web.sh`](InterLink-Setup-Web/build-web.sh) (Windows: `build-web.bat`) |
 
 Those two folders hold the one-click entry point for each OS. The build logic
 and the detailed platform notes stay in `packaging/` (below), so there is only
@@ -58,6 +60,28 @@ npm run tauri build -- --bundles deb,appimage   # Linux
 
 CI (`.github/workflows/build.yml`) builds installers for all three desktop OSes
 plus the Android APK on every push and on `v*` tags.
+
+## Browser version (no window toolkit)
+
+`interlink-web` runs the same laptop backend headless and serves the UI to your
+browser. It is one executable for the OS you build on, and needs no GTK,
+WebKit2GTK or WebView2 — any browser works.
+
+```bash
+cd desktop
+npm install
+npm run build:web                              # frontend + release binary
+src-tauri/target/release/interlink-web         # opens the link it prints
+```
+
+Or use the one-click scripts: `packaging/web/build-web.sh` (Linux/macOS) and
+`packaging/web/build-web.bat` (Windows). Details, options (`--port`,
+`--listen`, `--config-dir`) and the security model are in
+[`packaging/web/README.md`](packaging/web/README.md).
+
+The phone still dials **this computer** on TCP/UDP 27341, so the browser version
+and the desktop app cannot run at the same time. Pairing is shared through the
+config folder, so a laptop paired in one is paired in the other.
 
 ## Android app
 
