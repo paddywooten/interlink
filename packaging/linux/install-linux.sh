@@ -51,6 +51,16 @@ refresh_caches() {
     # desktops that have one.
     command -v gtk-update-icon-cache >/dev/null 2>&1 \
         && gtk-update-icon-cache -f -t "$ICON_ROOT" 2>/dev/null || true
+    # KDE keeps its own icon cache and service database. Without this, replacing
+    # an icon (a reinstall after a redesign) leaves the old picture on the
+    # desktop shortcut and in the dock until the next login.
+    touch "$ICON_ROOT" 2>/dev/null || true
+    rm -f "$HOME/.cache/icon-cache.kcache" 2>/dev/null || true
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+    elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+        kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
+    fi
 }
 
 if [ "$UNINSTALL" = "1" ]; then

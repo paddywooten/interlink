@@ -37,7 +37,7 @@ export default function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="brand">
-        <span className="brand-logo">⇄</span>
+        <img className="brand-logo" src="/icon.svg" alt="" width={26} height={26} />
         <span className="brand-name">InterLink</span>
       </div>
       <nav>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="1024" height="1024">
+  <!--
+    InterLink app icon — the single source for the phone and the desktop app.
+
+    The two arrows are the same paths as android/app/src/main/res/drawable/
+    ic_launcher_fg.xml, on the same #0B0E14 background (values/colors.xml
+    ic_launcher_bg). The viewBox is the 72x72 area of Android's 108x108 adaptive
+    icon that stays visible after the launcher's mask, so the arrows take the
+    same share of the icon here as they do on the phone.
+
+    Change the design here AND in ic_launcher_fg.xml, then run
+    branding/generate-icons.sh.
+  -->
+  <rect x="18" y="18" width="72" height="72" rx="16" fill="#0B0E14"/>
+  <!-- top arrow, pointing right -->
+  <path fill="#4F8CFF" d="M30,39 H64 V31 L80,44 L64,57 V49 H30 Z"/>
+  <!-- bottom arrow, pointing left -->
+  <path fill="#4F8CFF" d="M78,59 H44 V51 L28,64 L44,77 V69 H78 Z"/>
+</svg>
