@@ -185,6 +185,16 @@ pub async fn media_download(
     save_media(&state, id, suggested, subdir).await
 }
 
+/// Download a generic phone file (Files page) into the InterLink folder.
+#[cfg_attr(feature = "desktop", tauri::command)]
+pub async fn file_download(
+    state: State<'_, SharedState>,
+    id: String,
+    suggested: Option<String>,
+) -> Result<Value, String> {
+    save_file(&state, id, suggested, None).await
+}
+
 /// Pull a media item onto the laptop's disk, returning its path.
 /// Shared by "Save to laptop" and by drag-out (the OS needs a real file).
 pub async fn save_media(
@@ -225,8 +235,44 @@ pub async fn save_media_to(
         .ok_or_else(|| "internal: media path missing".to_string())
 }
 
+/// Same as `save_media_to`, for a generic phone file from `file.get`.
+#[cfg(feature = "web")]
+pub async fn save_file_to(
+    state: &SharedState,
+    id: String,
+    suggested: Option<String>,
+    dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let saved = save_file(state, id, suggested, Some(dir.display().to_string())).await?;
+    saved["path"]
+        .as_str()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "internal: file path missing".to_string())
+}
+
 async fn save_media_dir(
     state: &SharedState,
+    id: String,
+    suggested: Option<String>,
+    dl_dir: Option<String>,
+) -> Result<Value, String> {
+    save_via_get(state, "media.get", id, suggested, dl_dir).await
+}
+
+/// Pull a generic phone file onto the laptop's disk. Same chunk collector and
+/// assembly path as media, only the protocol request differs.
+pub async fn save_file(
+    state: &SharedState,
+    id: String,
+    suggested: Option<String>,
+    dl_dir: Option<String>,
+) -> Result<Value, String> {
+    save_via_get(state, "file.get", id, suggested, dl_dir).await
+}
+
+async fn save_via_get(
+    state: &SharedState,
+    request_type: &str,
     id: String,
     suggested: Option<String>,
     dl_dir: Option<String>,
@@ -238,12 +284,12 @@ async fn save_media_dir(
     let tid_label = b64u(&tid);
     let result = async {
         let d = state
-            .request_json("media.get", json!({ "id": id, "tid": tid_label }))
+            .request_json(request_type, json!({ "id": id, "tid": tid_label }))
             .await?;
         let size = d["size"].as_u64().unwrap_or(0);
         let name = suggested
             .or_else(|| d["name"].as_str().map(String::from))
-            .unwrap_or_else(|| format!("media_{id}"));
+            .unwrap_or_else(|| format!("download_{id}"));
         let mime = d["mime"].as_str().unwrap_or("application/octet-stream").to_string();
         let path =
             server::assemble_incoming(state, tid, size, name, mime, dl_dir, &mut rx).await;

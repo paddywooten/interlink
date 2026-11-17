@@ -742,6 +742,126 @@ nav {
   }
 }
 
+/* ============ Files + global drop-in ============ */
+.file-search {
+  flex: 1;
+  max-width: 360px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--fg);
+  border-radius: 10px;
+  padding: 8px 12px;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.crumb {
+  color: var(--accent);
+  padding: 2px 4px;
+}
+
+.crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+
+.file-list {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.file-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 34px 1fr 90px 110px auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+}
+
+.file-row:last-child {
+  border-bottom: none;
+}
+
+.file-row:hover {
+  background: var(--bg2);
+}
+
+.file-row[draggable="true"] {
+  cursor: grab;
+}
+
+.file-glyph {
+  font-size: 20px;
+  text-align: center;
+}
+
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta {
+  font-size: 12px;
+  text-align: right;
+}
+
+.file-drag-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(8, 12, 20, 0.78);
+  color: var(--fg);
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 9, 16, 0.72);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+
+.drop-card {
+  min-width: 360px;
+  max-width: 560px;
+  padding: 34px 40px;
+  border: 2px dashed var(--accent);
+  border-radius: 18px;
+  background: var(--bg2);
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.drop-card .drop-icon {
+  font-size: 44px;
+  color: var(--accent);
+}
+
+.drop-card span {
+  color: var(--fg2);
+  font-size: 13px;
+}
+
 /* ============ Empty states ============ */
 .empty {
   text-align: center;

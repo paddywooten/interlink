@@ -118,6 +118,8 @@ pub fn run() {
             commands::media_download,
             native_drag::media_drag,
             commands::media_stream_url,
+            commands::file_download,
+            native_drag::file_drag,
             commands::file_send,
             commands::mirror_start,
             commands::mirror_stop,

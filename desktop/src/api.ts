@@ -6,6 +6,7 @@ import type {
   CallEntry,
   CallState,
   Contact,
+  FileList,
   MediaItem,
   NotifItem,
   SeenDevice,
@@ -105,6 +106,18 @@ export const mediaDownload = (id: string, suggested?: string, subdir?: string) =
  * the mouse over the drop target. */
 export const mediaDrag = (id: string, suggested?: string, path?: string) =>
   invoke<{ ok: boolean; path?: string; busy?: boolean }>("media_drag", { id, suggested, path });
+
+/** Copy a generic phone file into the InterLink folder on this computer. */
+export const fileDownload = (id: string, suggested?: string) =>
+  invoke<{ ok: boolean; path: string; size: number }>("file_download", { id, suggested });
+
+/** Browser download URL for a generic phone file (web build only). */
+export const fileDownloadUrl = (id: string, name?: string) =>
+  `/api/file/file?id=${encodeURIComponent(id)}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
+
+/** Drag a Files row out of the desktop window as a real OS file. */
+export const fileDrag = (id: string, suggested?: string, path?: string) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean }>("file_drag", { id, suggested, path });
 
 /** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
  * the value lands in an SQL `ORDER BY`, so the phone only ever honours names
@@ -263,6 +276,12 @@ export const mediaList = (
     sort,
     dir,
   });
+
+/** Browse one folder of phone files. `path` is relative to the granted root. */
+export const fileList = (path: string, q?: string, offset = 0, limit = 200) =>
+  req<FileList>("file.list", { path, q, offset, limit });
+/** Open the phone's folder picker. The answer arrives as a `file.granted` push. */
+export const fileGrant = () => req<{ status: string }>("file.grant");
 /** The phone reports what it knows: an id, and how it resolved the number. */
 export const callDial = (number: string) =>
   req<{ callId: string; number?: string; name?: string }>("call.dial", { number });
@@ -305,6 +324,26 @@ export async function onEvent(cb: (ev: EvPayload) => void): Promise<() => void> 
   return () => es.close();
 }
 
+/** External files dragged into the desktop window. Tauri turns OS drops into
+ *  real paths; the browser build uses ordinary HTML5 drop events instead. */
+export type NativeDropEvent =
+  | { type: "enter"; paths: string[] }
+  | { type: "over" }
+  | { type: "drop"; paths: string[] }
+  | { type: "leave" };
+
+export async function onNativeDrop(cb: (ev: NativeDropEvent) => void): Promise<() => void> {
+  if (isWeb) return () => {};
+  const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+  return getCurrentWebview().onDragDropEvent((event) => {
+    const p = event.payload;
+    if (p.type === "enter") cb({ type: "enter", paths: p.paths });
+    else if (p.type === "drop") cb({ type: "drop", paths: p.paths });
+    else if (p.type === "leave") cb({ type: "leave" });
+    // `over` only carries a position — the overlay is already up.
+  });
+}
+
 // ——— Browser-only helpers ———
 
 /** The browser has no folder picker that yields a path on the machine running
@@ -330,17 +369,10 @@ function webPickFiles(accept?: string, multiple = true): Promise<string[]> {
     };
     input.addEventListener("cancel", () => done(() => resolve([])));
     input.addEventListener("change", async () => {
-      const files = Array.from(input.files ?? []);
       try {
         const paths: string[] = [];
-        for (const f of files) {
-          const res = await fetch(`/api/upload?name=${encodeURIComponent(f.name)}`, {
-            method: "PUT",
-            body: f,
-          });
-          const body = await res.json().catch(() => null);
-          if (!res.ok) throw (body && body.error) || `upload failed (HTTP ${res.status})`;
-          paths.push(body.path as string);
+        for (const f of Array.from(input.files ?? [])) {
+          paths.push(await uploadBrowserFile(f));
         }
         done(() => resolve(paths));
       } catch (e) {
@@ -350,6 +382,25 @@ function webPickFiles(accept?: string, multiple = true): Promise<string[]> {
     document.body.appendChild(input);
     input.click();
   });
+}
+
+/** Put browser file bytes where the local backend can read them. */
+async function uploadBrowserFile(f: File): Promise<string> {
+  const res = await fetch(`/api/upload?name=${encodeURIComponent(f.name)}`, {
+    method: "PUT",
+    body: f,
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw (body && body.error) || `upload failed (HTTP ${res.status})`;
+  return body.path as string;
+}
+
+/** HTML5 drop → upload to this machine → normal `file.offer` to the phone. */
+export async function sendDroppedFiles(files: File[]): Promise<void> {
+  for (const f of files) {
+    const path = await uploadBrowserFile(f);
+    await fileSend(path);
+  }
 }
 
 export type { CallState };

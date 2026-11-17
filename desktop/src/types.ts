@@ -140,6 +140,28 @@ export interface MediaItem {
   genre?: string;
 }
 
+/** One row of the phone's generic file index (`file.list`). */
+export interface FileItem {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  /** epoch ms */
+  date: number;
+  dir: boolean;
+  /** Relative path inside the granted folder; folders use it for navigation. */
+  path?: string;
+}
+
+export interface FileList {
+  granted: boolean;
+  root: string;
+  path: string;
+  crumbs: { name: string; path: string }[];
+  total: number;
+  items: FileItem[];
+}
+
 export interface CallState {
   state: "incoming" | "dialing" | "active" | "ended";
   dir: "in" | "out";

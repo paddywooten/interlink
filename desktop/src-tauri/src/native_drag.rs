@@ -5,7 +5,7 @@
 //! drag from the app window. The browser build cannot do that — it offers a
 //! normal download instead.
 
-use crate::commands::save_media;
+use crate::commands::{save_file, save_media};
 use crate::state::SharedState;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,11 +36,53 @@ pub async fn media_drag(
     if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
         return Ok(json!({ "ok": false, "busy": true }));
     }
-    let result = prepare_and_drag(&state, &app, window, id, suggested, path).await;
+    let result = prepare_and_drag(
+        &state,
+        &app,
+        window,
+        DragSource::Media(id),
+        suggested,
+        path,
+    )
+    .await;
     if result.is_err() {
         DRAG_ACTIVE.store(false, Ordering::SeqCst);
     }
     result
+}
+
+/// Drag a generic phone file (Files page) out of the window. Same native drag
+/// machinery as a gallery item; only the download request differs.
+#[tauri::command]
+pub async fn file_drag(
+    state: State<'_, SharedState>,
+    app: tauri::AppHandle,
+    window: tauri::Window,
+    id: String,
+    suggested: Option<String>,
+    path: Option<String>,
+) -> Result<Value, String> {
+    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Ok(json!({ "ok": false, "busy": true }));
+    }
+    let result = prepare_and_drag(
+        &state,
+        &app,
+        window,
+        DragSource::File(id),
+        suggested,
+        path,
+    )
+    .await;
+    if result.is_err() {
+        DRAG_ACTIVE.store(false, Ordering::SeqCst);
+    }
+    result
+}
+
+enum DragSource {
+    Media(String),
+    File(String),
 }
 
 /// Set while a drag-out is downloading or being dragged; cleared when the
@@ -55,19 +97,22 @@ async fn prepare_and_drag(
     state: &SharedState,
     app: &tauri::AppHandle,
     window: tauri::Window,
-    id: String,
+    source: DragSource,
     suggested: Option<String>,
     path: Option<String>,
 ) -> Result<Value, String> {
     let reused = match path {
         Some(p) if std::path::Path::new(&p).is_file() => p,
         _ => {
-            let saved = save_media(state, id, suggested, None).await?;
+            let saved = match source {
+                DragSource::Media(id) => save_media(state, id, suggested, None).await?,
+                DragSource::File(id) => save_file(state, id, suggested, None).await?,
+            };
             saved
                 .get("path")
                 .and_then(Value::as_str)
                 .map(String::from)
-                .ok_or_else(|| "internal: media path missing".to_string())?
+                .ok_or_else(|| "internal: download path missing".to_string())?
         }
     };
 

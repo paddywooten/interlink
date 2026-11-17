@@ -33,6 +33,7 @@ import com.interlink.app.handlers.CallHandler
 import com.interlink.app.handlers.CallLogHandler
 import com.interlink.app.handlers.ContactsHandler
 import com.interlink.app.handlers.DeviceHandler
+import com.interlink.app.handlers.FileHandler
 import com.interlink.app.handlers.MediaHandler
 import com.interlink.app.handlers.MediaStream
 import com.interlink.app.handlers.SmsHandler
@@ -297,6 +298,13 @@ class LinkService : Service() {
                 // thumb/get respond on the session themselves, then stream.
                 "media.thumb" -> MediaHandler.thumb(this, session, env)
                 "media.get" -> MediaHandler.get(this, session, env)
+
+                // Generic phone files (Files page). The folder picker runs on
+                // the phone; file.grant answers at once and file.granted is a
+                // later push because the user may take a while to choose.
+                "file.grant" -> respond(session, env, FileHandler.requestGrant(this, client))
+                "file.list" -> respond(session, env, FileHandler.list(this, env.d))
+                "file.get" -> FileHandler.get(this, session, env)
 
                 "file.offer" -> respond(session, env, MediaHandler.receiveOffer(this, client, env.d))
 

@@ -79,9 +79,10 @@ the network can take over the session. Use it only on a network you trust.
 
 | Feature | Browser |
 |---|---|
-| Send files to phone | Browser file picker; the bytes are uploaded to the machine running `interlink-web` first |
+| Send files to phone | Browser file picker or **drop files anywhere into the page**; the bytes are uploaded to the machine running `interlink-web` first, then pushed to the phone |
 | Save from phone | Normal browser download (Chromium/Firefox save it wherever your browser saves files) |
-| Drag out of the Gallery | Use *Save to laptop*; dragging a tile to the desktop is a native-window feature |
+| Browse phone files | Files page works the same; **Choose phone folder** opens the picker on the phone |
+| Drag out of the Gallery / Files | Use *Save to laptop* / *Download*; native drag-out is a desktop-window feature |
 | Notifications | Browser notifications while the tab is in the background (allow them when asked) |
 | Show in folder | Not available; the file is wherever your browser put it |
 | Call audio / mic / speaker | Unchanged — audio runs in `interlink-web`, not the browser |

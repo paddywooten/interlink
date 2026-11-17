@@ -18,6 +18,14 @@ Two components, one encrypted protocol:
   thumbnails, and in-app video that streams straight off the phone, so
   scrubbing works without waiting for a copy. **Drag a photo or video out of
   the window** onto the desktop or a file manager to copy it to the laptop
+- 📂 Files — browse the phone's documents and Downloads on the laptop. On
+  Android 11+ InterLink cannot enumerate arbitrary storage from a background
+  service, so the **Choose phone folder** button opens the system folder picker
+  on the phone once; the grant is persisted (no root, no all-files permission).
+  Save files to the laptop or drag them out of the window. **Drop files anywhere
+  into the app window** to copy them the other way, into `Downloads/InterLink`
+  on the phone — both directions work in the browser version too (browser
+  downloads/save and HTML5 drop-in)
 - 🎵 Music — the phone's whole song library, searchable by title, artist,
   album or genre and sortable by any of them (plus filename, date and size
   from a dropdown), with an always-on player: queue, seek, next/prev, ±10 s,

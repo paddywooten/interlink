@@ -82,6 +82,13 @@
             </intent-filter>
         </activity>
 
+        <!-- Persisted folder grant for the desktop's Files page. Translucent:
+             it is only a trampoline for ACTION_OPEN_DOCUMENT_TREE. -->
+        <activity
+            android:name=".FilePickerActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Persistent link service -->
         <service
             android:name=".service.LinkService"

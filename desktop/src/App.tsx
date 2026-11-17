@@ -1,11 +1,13 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import * as api from "./api";
 import Sidebar from "./components/Sidebar";
+import DropOverlay from "./components/DropOverlay";
 import Toasts from "./components/Toasts";
 import Dashboard from "./pages/Dashboard";
 import Messages from "./pages/Messages";
 import Notifications from "./pages/Notifications";
 import Gallery from "./pages/Gallery";
+import Files from "./pages/Files";
 import Music from "./pages/Music";
 import Contacts from "./pages/Contacts";
 import Calls from "./pages/Calls";
@@ -52,6 +54,93 @@ export default function App() {
   // Same for the in-call bar, which stands down on Calls (the page's own
   // call card already carries these controls).
   const inCall = useStore((s) => s.call !== null && s.page !== "calls");
+  const [dropping, setDropping] = useState(false);
+
+  // Global drop-in: files dropped anywhere in the window are copied to the
+  // phone. Desktop events carry real paths from Tauri; the browser uploads the
+  // File objects to the machine running interlink-web, then uses the same
+  // file.offer transfer.
+  useEffect(() => {
+    let alive = true;
+    let cleanup = () => {};
+
+    const sendPaths = async (paths: string[]) => {
+      setDropping(false);
+      if (paths.length === 0) return;
+      if (!getState().connected) {
+        toast("Phone offline — files were not sent", "error");
+        return;
+      }
+      toast(`Sending ${paths.length} file${paths.length === 1 ? "" : "s"} to phone…`, "info");
+      try {
+        for (const path of paths) await api.fileSend(path);
+        toast(`Copied ${paths.length} file${paths.length === 1 ? "" : "s"} to phone`, "success");
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    };
+
+    if (api.isWeb) {
+      let depth = 0;
+      const hasFiles = (e: DragEvent) =>
+        Array.from(e.dataTransfer?.types ?? []).includes("Files");
+      const enter = (e: DragEvent) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        depth++;
+        setDropping(true);
+      };
+      const over = (e: DragEvent) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+      };
+      const leave = (e: DragEvent) => {
+        if (!hasFiles(e)) return;
+        depth = Math.max(0, depth - 1);
+        if (depth === 0) setDropping(false);
+      };
+      const drop = (e: DragEvent) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        depth = 0;
+        setDropping(false);
+        const files = Array.from(e.dataTransfer?.files ?? []);
+        if (files.length === 0) return;
+        if (!getState().connected) {
+          toast("Phone offline — files were not sent", "error");
+          return;
+        }
+        toast(`Sending ${files.length} file${files.length === 1 ? "" : "s"} to phone…`, "info");
+        api.sendDroppedFiles(files)
+          .then(() => toast(`Copied ${files.length} file${files.length === 1 ? "" : "s"} to phone`, "success"))
+          .catch((err) => toast(String(err), "error"));
+      };
+      window.addEventListener("dragenter", enter);
+      window.addEventListener("dragover", over);
+      window.addEventListener("dragleave", leave);
+      window.addEventListener("drop", drop);
+      cleanup = () => {
+        window.removeEventListener("dragenter", enter);
+        window.removeEventListener("dragover", over);
+        window.removeEventListener("dragleave", leave);
+        window.removeEventListener("drop", drop);
+      };
+    } else {
+      api.onNativeDrop((ev) => {
+        if (ev.type === "enter") setDropping(true);
+        else if (ev.type === "leave") setDropping(false);
+        else if (ev.type === "drop") sendPaths(ev.paths);
+      }).then((unlisten) => {
+        if (!alive) unlisten();
+        else cleanup = unlisten;
+      });
+    }
+
+    return () => {
+      alive = false;
+      cleanup();
+    };
+  }, []);
 
   // Browsers only allow the notification prompt after a user gesture, so ask
   // on the first click/tap rather than at load (which every browser blocks).
@@ -196,6 +285,14 @@ export default function App() {
           case "file.offer":
             toast(`Phone offered "${d.name}" — enable auto-accept in Settings`, "info");
             break;
+          case "file.granted":
+            if (d.granted === false) {
+              toast("Folder selection cancelled", "info");
+            } else {
+              toast(`Phone folder ready: ${d.root ?? "selected folder"}`, "success");
+              window.dispatchEvent(new CustomEvent("il:files-changed", { detail: d }));
+            }
+            break;
           case "mirror.frame":
             // High-frequency (8fps): don't touch the store — hand the JPEG to
             // the Mirror page via a CustomEvent so it can paint without
@@ -242,6 +339,9 @@ export default function App() {
     case "gallery":
       pageEl = <Gallery />;
       break;
+    case "files":
+      pageEl = <Files />;
+      break;
     case "music":
       pageEl = <Music />;
       break;
@@ -281,6 +381,7 @@ export default function App() {
         <CallBar />
       </main>
       <Toasts />
+      <DropOverlay active={dropping} />
       <QrModal />
     </div>
   );

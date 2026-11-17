@@ -120,6 +120,7 @@ pub async fn run(cfg: WebConfig) -> Result<(), String> {
         .route("/api/events", get(events))
         .route("/api/upload", put(upload))
         .route("/api/media/file", get(media_file))
+        .route("/api/file/file", get(file_file))
         .route("/api/{cmd}", any(api))
         .fallback(static_asset)
         // Uploads are whole videos and APKs, not form fields. They land in a
@@ -340,6 +341,15 @@ async fn dispatch(state: &SharedState, cmd: &str, args: Value) -> Result<Value, 
             let a: A = parse(args)?;
             commands::media_download(st, a.id, a.suggested, a.subdir).await
         }
+        "file_download" => {
+            #[derive(Deserialize)]
+            struct A {
+                id: String,
+                suggested: Option<String>,
+            }
+            let a: A = parse(args)?;
+            commands::file_download(st, a.id, a.suggested).await
+        }
         "media_stream_url" => {
             #[derive(Deserialize)]
             struct A {
@@ -475,7 +485,9 @@ async fn dispatch(state: &SharedState, cmd: &str, args: Value) -> Result<Value, 
         "pick_apk" | "pick_backup_dir" | "pick_directory" => Ok(json!({ "path": null })),
         "pick_files" => Ok(json!({ "paths": [] })),
         "reveal_in_folder" => Ok(Value::Null),
-        "media_drag" => Err("unsupported: dragging out needs the desktop app; use Download".into()),
+        "media_drag" | "file_drag" => {
+            Err("unsupported: dragging out needs the desktop app; use Download".into())
+        }
         other => Err(format!("not_found: unknown command {other}")),
     }
 }
@@ -582,6 +594,59 @@ async fn media_file(State(ctx): State<Ctx>, Query(q): Query<MediaQuery>) -> Resp
                 return error(StatusCode::INTERNAL_SERVER_ERROR, format!("internal: {e}"));
             }
             folder.join(pulled.file_name().unwrap_or_else(|| std::ffi::OsStr::new("media")))
+        }
+    };
+    sweep_old(&ctx.cache);
+    let file = match tokio::fs::File::open(&saved).await {
+        Ok(f) => f,
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("internal: {e}")),
+    };
+    let name = saved.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+    let len = file.metadata().await.map(|m| m.len()).ok();
+    let mime = mime_guess::from_path(&saved).first_or_octet_stream();
+    let mut res = Response::new(Body::from_stream(tokio_util::io::ReaderStream::new(file)));
+    let h = res.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(mime.as_ref()) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    if let Some(len) = len {
+        h.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+    }
+    let ascii: String = name.chars().map(|c| if c.is_ascii() && c != '"' && c != '\\' { c } else { '_' }).collect();
+    let disp = format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{}", pct_encode(&name));
+    if let Ok(v) = HeaderValue::from_str(&disp) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    res
+}
+
+/// A generic phone file as a normal browser download (Files page). Same
+/// staged-cache behaviour as a media download, with `file.get` as the source.
+async fn file_file(State(ctx): State<Ctx>, Query(q): Query<MediaQuery>) -> Response {
+    let key = format!("file_{}", media_cache_key(&q.id));
+    let folder = ctx.cache.join(&key);
+    let saved = match cached_file(&folder).await {
+        Some(p) => p,
+        None => {
+            let staging = ctx.cache.join(format!("{key}.part"));
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            if let Err(e) = tokio::fs::create_dir_all(&staging).await {
+                return error(StatusCode::INTERNAL_SERVER_ERROR, format!("internal: {e}"));
+            }
+            let pulled = commands::save_file_to(&ctx.state, q.id.clone(), q.name, &staging).await;
+            let pulled = match pulled {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir_all(&staging).await;
+                    return error(StatusCode::BAD_GATEWAY, e);
+                }
+            };
+            let _ = tokio::fs::remove_dir_all(&folder).await;
+            if let Err(e) = tokio::fs::rename(&staging, &folder).await {
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return error(StatusCode::INTERNAL_SERVER_ERROR, format!("internal: {e}"));
+            }
+            folder.join(pulled.file_name().unwrap_or_else(|| std::ffi::OsStr::new("file")))
         }
     };
     sweep_old(&ctx.cache);
