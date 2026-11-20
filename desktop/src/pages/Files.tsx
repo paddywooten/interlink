@@ -116,7 +116,7 @@ export default function Files() {
     dragBusy.current = true;
     setPreparing(f.id);
     try {
-      const r = await api.fileDrag(f.id, f.name, draggedPaths.current[f.id]);
+      const r = await api.fileDrag(f.id, f.name, draggedPaths.current[f.id], f.size);
       if (r.path) draggedPaths.current[f.id] = r.path;
     } catch (e) {
       toast(String(e), "error");

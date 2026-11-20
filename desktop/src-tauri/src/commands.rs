@@ -270,6 +270,37 @@ pub async fn save_file(
     save_via_get(state, "file.get", id, suggested, dl_dir).await
 }
 
+/// Phone-side chunk size (PROTOCOL.md §4: 64 KiB). A transfer can only be
+/// resumed on a chunk boundary, which is where every partial file ends.
+const TRANSFER_CHUNK: u64 = 64 * 1024;
+/// A 300 MB file may outlive a dozen short WiFi drops. Resume for as long as
+/// the transfer is making progress rather than giving up after a few attempts;
+/// the deadline keeps a truly dead phone from hanging the command forever.
+const TRANSFER_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
+/// The phone reconnects a few seconds after a WiFi drop. Wait for it rather
+/// than failing a large download on the first hiccup.
+async fn wait_for_phone(state: &SharedState, timeout: Duration) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if state.inner.lock().await.conn.is_some() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("offline: phone is not connected".into());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Pull a file from the phone, resuming after a dropped link.
+///
+/// A phone disconnect used to end the collector early while the command still
+/// returned `ok: true`, so a 328 MB zip was "saved" as a 17 MB fragment and a
+/// drag-out handed that fragment to the desktop. Here every attempt must
+/// deliver the full advertised size (and every advertised chunk); otherwise
+/// the partial is kept only as the starting point for the next attempt. If no
+/// attempt completes, the partial is deleted and the error is reported.
 async fn save_via_get(
     state: &SharedState,
     request_type: &str,
@@ -277,28 +308,139 @@ async fn save_via_get(
     suggested: Option<String>,
     dl_dir: Option<String>,
 ) -> Result<Value, String> {
-    let tid = crypto::new_transfer_id();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
-    state.inner.lock().await.data_collectors.insert(tid, tx);
+    let base = dl_dir
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(server::default_download_dir);
+    let _ = tokio::fs::create_dir_all(&base).await;
 
-    let tid_label = b64u(&tid);
-    let result = async {
+    let mut dest: Option<std::path::PathBuf> = None;
+    let mut size = 0u64;
+    let name_hint = suggested;
+    let mut mime = "application/octet-stream".to_string();
+    let mut last_error = String::new();
+    let started = tokio::time::Instant::now();
+    let mut attempt = 0usize;
+
+    loop {
+        if tokio::time::Instant::now() >= started + TRANSFER_DEADLINE {
+            if last_error.is_empty() {
+                last_error = "transfer timed out after 30 minutes".into();
+            }
+            break;
+        }
+        attempt += 1;
+        if let Err(e) = wait_for_phone(state, Duration::from_secs(45)).await {
+            last_error = e;
+            break;
+        }
+        if tokio::time::Instant::now() >= started + TRANSFER_DEADLINE {
+            if last_error.is_empty() {
+                last_error = "transfer timed out after 30 minutes".into();
+            }
+            break;
+        }
+        let offset = match &dest {
+            Some(p) => tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0),
+            None => 0,
+        };
+        if offset % TRANSFER_CHUNK != 0 {
+            last_error = format!("partial file is {offset} bytes — not on a chunk boundary");
+            break;
+        }
+
+        let tid = crypto::new_transfer_id();
+        let tid_label = b64u(&tid);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, Vec<u8>)>(512);
+        state.inner.lock().await.data_collectors.insert(tid, tx);
+
         let d = state
-            .request_json(request_type, json!({ "id": id, "tid": tid_label }))
-            .await?;
-        let size = d["size"].as_u64().unwrap_or(0);
-        let name = suggested
+            .request_json(
+                request_type,
+                json!({ "id": id, "tid": tid_label, "offset": offset }),
+            )
+            .await;
+        let d = match d {
+            Ok(d) => d,
+            Err(e) => {
+                state.inner.lock().await.data_collectors.remove(&tid);
+                last_error = e;
+                continue; // reconnect and try the remaining bytes again
+            }
+        };
+        let advertised = d["size"].as_u64().unwrap_or(0);
+        if advertised == 0 {
+            state.inner.lock().await.data_collectors.remove(&tid);
+            last_error = "phone reported an empty file".into();
+            break;
+        }
+        let name = name_hint
+            .clone()
             .or_else(|| d["name"].as_str().map(String::from))
             .unwrap_or_else(|| format!("download_{id}"));
-        let mime = d["mime"].as_str().unwrap_or("application/octet-stream").to_string();
-        let path =
-            server::assemble_incoming(state, tid, size, name, mime, dl_dir, &mut rx).await;
-        let path = path.display().to_string();
-        Ok::<Value, String>(json!({ "ok": true, "path": path, "tid": tid_label, "size": size }))
+        if dest.is_none() {
+            dest = Some(server::unique_path(&base, &name));
+            mime = d["mime"]
+                .as_str()
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            size = advertised;
+        } else if advertised != size {
+            state.inner.lock().await.data_collectors.remove(&tid);
+            last_error = format!(
+                "file changed during transfer ({size} → {advertised} bytes)"
+            );
+            break;
+        }
+
+        let chunks = d["chunks"].as_u64();
+        let outcome = server::assemble_incoming_at(
+            state,
+            tid,
+            size,
+            chunks,
+            name,
+            mime.clone(),
+            dl_dir.clone(),
+            &mut rx,
+            dest.as_deref(),
+            (offset / TRANSFER_CHUNK) as u32,
+        )
+        .await;
+        state.inner.lock().await.data_collectors.remove(&tid);
+
+        match outcome {
+            Ok(r) => {
+                return Ok(json!({
+                    "ok": true,
+                    "path": r.path.display().to_string(),
+                    "tid": tid_label,
+                    "size": r.received,
+                }))
+            }
+            Err(e) => {
+                dest = Some(e.path.clone());
+                last_error = e.message;
+                if tokio::time::Instant::now() >= started + TRANSFER_DEADLINE {
+                    break;
+                }
+                log::info!(
+                    "transfer attempt {attempt} failed: {last_error}; resuming from {offset} bytes"
+                );
+                tokio::time::sleep(Duration::from_millis(400)).await;
+            }
+        }
     }
-    .await;
-    state.inner.lock().await.data_collectors.remove(&tid);
-    result
+
+    // Never leave a half-written file that a later drag could pick up.
+    if let Some(p) = dest {
+        let _ = tokio::fs::remove_file(p).await;
+    }
+    Err(if last_error.is_empty() {
+        "transfer failed".into()
+    } else {
+        last_error
+    })
 }
 
 /// A URL the webview can put straight into `<audio>` / `<video>` and play.

@@ -161,7 +161,7 @@ export default function Gallery() {
     dragBusy.current = true;
     setPreparing(item.id);
     try {
-      const r = await api.mediaDrag(item.id, item.name, draggedPaths.current[item.id]);
+      const r = await api.mediaDrag(item.id, item.name, draggedPaths.current[item.id], item.size);
       if (r.path) draggedPaths.current[item.id] = r.path;
     } catch (e) {
       toast(String(e), "error");

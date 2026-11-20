@@ -254,7 +254,7 @@ async fn download_all_media(state: &SharedState, dir: &Path) -> Result<u64, Stri
                     Some(dir.display().to_string()),
                     &mut rx,
                 )
-                .await;
+                .await?;
                 Ok::<(), String>(())
             }
             .await;

@@ -783,85 +783,202 @@ async fn handle_inbound_file_offer(state: &SharedState, env: Envelope) {
         cfg.download_dir.clone()
     };
     tokio::spawn(async move {
-        assemble_incoming(&st, tid, size, name, mime, dl_dir, &mut rx).await;
+        if let Err(e) = assemble_incoming(&st, tid, size, name, mime, dl_dir, &mut rx).await {
+            log::warn!("incoming file transfer failed: {} (partial: {})", e.message, e.path.display());
+            let _ = tokio::fs::remove_file(&e.path).await;
+        }
         st.inner.lock().await.data_collectors.remove(&tid);
     });
+}
+
+/// Why an incoming transfer did not complete. The partial file is kept so a
+/// caller can resume from `PATH`'s current length instead of starting over.
+#[derive(Debug)]
+pub struct TransferError {
+    pub message: String,
+    pub path: std::path::PathBuf,
+}
+
+impl std::fmt::Display for TransferError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<TransferError> for String {
+    fn from(e: TransferError) -> String {
+        e.message
+    }
+}
+
+/// The outcome of a completed (or resumed-to-completion) transfer.
+pub struct Assembled {
+    pub path: std::path::PathBuf,
+    pub received: u64,
 }
 
 /// Collect chunks for an incoming transfer and write to disk. Returns the
 /// path the file landed on (callers like `media_download` hand it to the UI
 /// so the webview can play a just-downloaded video through the asset URL).
+///
+/// A transfer that ends before every advertised byte has arrived is an **error**:
+/// silently returning a partial file is what used to make a dragged-out zip
+/// look saved but refuse to open.
 pub async fn assemble_incoming(
     state: &SharedState,
     tid: [u8; 16],
     size: u64,
     name: String,
+    mime: String,
+    download_dir: Option<String>,
+    rx: &mut mpsc::Receiver<(u32, Vec<u8>)>,
+) -> Result<std::path::PathBuf, TransferError> {
+    let result = assemble_incoming_at(
+        state, tid, size, None, name, mime, download_dir, rx, None, 0,
+    )
+    .await?;
+    Ok(result.path)
+}
+
+/// Same collector, but able to continue a file left by an earlier attempt.
+///
+/// `append_to` names the existing partial file and `start_seq` is the chunk
+/// number its length corresponds to. The sender is asked (via the `offset`
+/// field of `file.get` / `media.get`) to start from that byte, so a dropped
+/// WiFi link in the middle of a large file costs only the chunk in flight.
+pub async fn assemble_incoming_at(
+    state: &SharedState,
+    tid: [u8; 16],
+    size: u64,
+    expected_chunks: Option<u64>,
+    name: String,
     _mime: String,
     download_dir: Option<String>,
     rx: &mut mpsc::Receiver<(u32, Vec<u8>)>,
-) -> std::path::PathBuf {
-    let base = download_dir
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(default_download_dir);
-    let _ = tokio::fs::create_dir_all(&base).await;
-    let dest = unique_path(&base, &name);
+    append_to: Option<&std::path::Path>,
+    start_seq: u32,
+) -> Result<Assembled, TransferError> {
+    use tokio::io::AsyncWriteExt;
+
+    let dest = match append_to {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let base = download_dir
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(default_download_dir);
+            let _ = tokio::fs::create_dir_all(&base).await;
+            unique_path(&base, &name)
+        }
+    };
+    let fail = |message: String| TransferError { message, path: dest.clone() };
     // Progress is keyed by the same b64u tid the sender used, so a caller that
     // issued the transfer can correlate the stream.
     let tid_label = b64u(&tid);
 
-    let mut file = match tokio::fs::File::create(&dest).await {
+    let mut received = tokio::fs::metadata(&dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&dest)
+        .await
+    {
         Ok(f) => f,
         Err(e) => {
-            state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": e.to_string() } }));
-            // drain until done so the sender can finish
-            while rx.recv().await.is_some() {}
-            return dest;
+            let message = e.to_string();
+            state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
+            return Err(fail(message));
         }
     };
 
-    use tokio::io::AsyncWriteExt;
-    let mut received: u64 = 0;
-    let mut next_seq: u32 = 0;
-    let mut completed = false;
+    if size == 0 {
+        // Nothing to stream (an empty file). The sender still gets a tid so
+        // the response is well-formed, but there are no data frames to read.
+        let _ = file.flush().await;
+        return Ok(Assembled { path: dest, received });
+    }
+    if received > size {
+        return Err(fail(format!(
+            "transfer received {received} bytes but the file is {size} bytes"
+        )));
+    }
+
+    let mut next_seq = start_seq;
+    let mut failure: Option<String> = None;
     loop {
         // A stalled sender must not hang the collector forever (a big video
         // that dies mid-stream otherwise wedges the request for good).
         let item = match tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv()).await {
             Ok(item) => item,
             Err(_) => {
-                state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": "timed out waiting for data" } }));
+                failure = Some("timed out waiting for data".into());
                 break;
             }
         };
-        let Some((seq, chunk)) = item else { break };
+        let Some((seq, chunk)) = item else {
+            failure = Some("connection lost before the transfer finished".into());
+            break;
+        };
         if seq != next_seq {
-            state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": "sequence gap" } }));
+            // A resumed sender that ignored `offset` starts again at 0. That
+            // would append a second copy of the file, so reject it instead.
+            failure = Some(format!("chunk {seq} out of order (expected {next_seq})"));
             break;
         }
         next_seq += 1;
         received += chunk.len() as u64;
-        if file.write_all(&chunk).await.is_err() {
-            state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": "disk write failed" } }));
+        if received > size {
+            failure = Some(format!("sender sent more than the advertised {size} bytes"));
             break;
         }
-        if size > 0 && received % (1024 * 1024) < 65536 {
+        if let Err(e) = file.write_all(&chunk).await {
+            failure = Some(format!("disk write failed: {e}"));
+            break;
+        }
+        if received % (1024 * 1024) < chunk.len() as u64 {
             state.emit("progress", json!({ "tid": tid_label, "received": received, "total": size }));
         }
-        if size > 0 && received >= size {
-            completed = true;
+        if received == size {
             break;
         }
     }
     let _ = file.flush().await;
 
-    if completed || (size == 0 && received > 0) {
-        state.emit("progress", json!({ "tid": tid_label, "received": received, "total": size.max(received) }));
-        state.emit(
-            "push",
-            json!({ "t": "transfer.done", "d": { "name": name, "path": dest.display().to_string(), "size": received } }),
-        );
+    if let Some(message) = failure {
+        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
+        return Err(fail(message));
     }
-    dest
+    if !transfer_complete(received, size, next_seq, expected_chunks) {
+        let message = format!(
+            "incomplete transfer: {received} of {size} bytes, chunk {next_seq} of {:?}",
+            expected_chunks.unwrap_or(0)
+        );
+        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
+        return Err(fail(message));
+    }
+    // A drag-out hands this path straight to the OS. Make sure the bytes are
+    // really on disk before the webview is told the save succeeded.
+    if let Err(e) = file.sync_all().await {
+        let message = format!("could not flush the file: {e}");
+        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
+        return Err(fail(message));
+    }
+
+    state.emit("progress", json!({ "tid": tid_label, "received": received, "total": size }));
+    state.emit(
+        "push",
+        json!({ "t": "transfer.done", "d": { "name": name, "path": dest.display().to_string(), "size": received } }),
+    );
+    Ok(Assembled { path: dest, received })
+}
+
+/// A transfer is only complete when every advertised byte arrived and every
+/// advertised chunk was seen. Checking the size alone is not enough: a resumed
+/// transfer that skipped a chunk can still land on the right byte count.
+fn transfer_complete(received: u64, size: u64, next_seq: u32, chunks: Option<u64>) -> bool {
+    received == size && chunks.map_or(true, |c| c == 0 || next_seq as u64 == c)
 }
 
 pub fn default_download_dir() -> std::path::PathBuf {
@@ -924,7 +1041,7 @@ pub fn take_notif_image(d: &mut Value) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::take_notif_image;
+    use super::{take_notif_image, transfer_complete};
     use base64::Engine;
     use serde_json::json;
 
@@ -965,5 +1082,26 @@ mod tests {
     fn non_object_payloads_are_ignored() {
         let mut d = json!("just a string");
         assert!(take_notif_image(&mut d).is_none());
+    }
+
+    /// A 17 MB fragment of a 328 MB zip must never be reported as a finished
+    /// transfer, whatever the chunk counter says.
+    #[test]
+    fn a_short_transfer_is_never_complete() {
+        assert!(!transfer_complete(17_170_432, 328_380_182, 262, Some(5011)));
+        assert!(!transfer_complete(328_380_182, 328_380_182, 262, Some(5011)));
+    }
+
+    /// Resuming from byte N starts at chunk N/65536 and ends at the total chunk
+    /// count advertised in the response.
+    #[test]
+    fn a_resumed_transfer_completes_on_the_total_chunk_count() {
+        let chunk = 64 * 1024;
+        let total = 8 * chunk + 123;
+        assert!(transfer_complete(total, total, 9, Some(9)));
+        assert!(transfer_complete(total, total, 9, None));
+        // An old sender that ignored `offset` restarts at chunk 0 — the byte
+        // count would match only by accident, but the chunk count does not.
+        assert!(!transfer_complete(total, total, 8, Some(9)));
     }
 }

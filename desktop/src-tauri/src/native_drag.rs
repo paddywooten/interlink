@@ -29,6 +29,7 @@ pub async fn media_drag(
     id: String,
     suggested: Option<String>,
     path: Option<String>,
+    size: Option<u64>,
 ) -> Result<Value, String> {
     // One drag at a time. While the button is held the webview keeps raising
     // `dragstart` for every tile the pointer crosses; without this a single
@@ -43,6 +44,7 @@ pub async fn media_drag(
         DragSource::Media(id),
         suggested,
         path,
+        size,
     )
     .await;
     if result.is_err() {
@@ -61,6 +63,7 @@ pub async fn file_drag(
     id: String,
     suggested: Option<String>,
     path: Option<String>,
+    size: Option<u64>,
 ) -> Result<Value, String> {
     if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
         return Ok(json!({ "ok": false, "busy": true }));
@@ -72,6 +75,7 @@ pub async fn file_drag(
         DragSource::File(id),
         suggested,
         path,
+        size,
     )
     .await;
     if result.is_err() {
@@ -100,9 +104,20 @@ async fn prepare_and_drag(
     source: DragSource,
     suggested: Option<String>,
     path: Option<String>,
+    size: Option<u64>,
 ) -> Result<Value, String> {
+    // Only reuse a file from an earlier drag if its length still matches the
+    // phone's listing. A partial left behind by an interrupted transfer is
+    // never a valid drag source.
     let reused = match path {
-        Some(p) if std::path::Path::new(&p).is_file() => p,
+        Some(p)
+            if std::path::Path::new(&p).is_file()
+                && size.map_or(true, |want| {
+                    std::fs::metadata(&p).map(|m| m.len() == want).unwrap_or(false)
+                }) =>
+        {
+            p
+        }
         _ => {
             let saved = match source {
                 DragSource::Media(id) => save_media(state, id, suggested, None).await?,

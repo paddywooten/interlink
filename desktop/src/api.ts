@@ -104,8 +104,8 @@ export const mediaDownload = (id: string, suggested?: string, subdir?: string) =
  * (unless `path` already points at a file from an earlier drag) and then
  * starts a native drag from the window, which the user finishes by releasing
  * the mouse over the drop target. */
-export const mediaDrag = (id: string, suggested?: string, path?: string) =>
-  invoke<{ ok: boolean; path?: string; busy?: boolean }>("media_drag", { id, suggested, path });
+export const mediaDrag = (id: string, suggested?: string, path?: string, size?: number) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean }>("media_drag", { id, suggested, path, size });
 
 /** Copy a generic phone file into the InterLink folder on this computer. */
 export const fileDownload = (id: string, suggested?: string) =>
@@ -116,8 +116,8 @@ export const fileDownloadUrl = (id: string, name?: string) =>
   `/api/file/file?id=${encodeURIComponent(id)}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
 
 /** Drag a Files row out of the desktop window as a real OS file. */
-export const fileDrag = (id: string, suggested?: string, path?: string) =>
-  invoke<{ ok: boolean; path?: string; busy?: boolean }>("file_drag", { id, suggested, path });
+export const fileDrag = (id: string, suggested?: string, path?: string, size?: number) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean }>("file_drag", { id, suggested, path, size });
 
 /** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
  * the value lands in an SQL `ORDER BY`, so the phone only ever honours names

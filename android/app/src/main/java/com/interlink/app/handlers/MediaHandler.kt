@@ -506,14 +506,21 @@ object MediaHandler {
 
     // ——— media.get ———
 
-    /** Respond with {tid,size,chunks,name,mime}, then stream N × 0x02 frames. */
+    /** Respond with {tid,size,chunks,name,mime}, then stream N × 0x02 frames.
+     *
+     * `offset` is a chunk-aligned byte count for resuming an interrupted
+     * transfer; size/chunks still describe the whole item so the laptop can
+     * verify it has every byte. */
     suspend fun get(context: Context, session: LinkSession, env: Envelope) =
         withContext(Dispatchers.IO) {
             val d = env.d
             val idStr = d.str("id") ?: throw Exception("not_found: missing id")
             val tidB64 = d.str("tid") ?: throw Exception("internal: missing tid")
+            val offset = (d.long("offset") ?: 0L).coerceAtLeast(0L)
+            if (offset % CHUNK != 0L) throw Exception("bad_request: offset must be a multiple of 64 KiB")
             val entry = resolve(idStr)
             val (name, size, mime) = metadata(context, entry)
+            if (offset > size) throw Exception("bad_request: offset past end of media")
 
             // Response first so the laptop knows what to expect; chunks follow.
             session.respond(
@@ -530,8 +537,20 @@ object MediaHandler {
             )
             val raw = tidRaw(tidB64)
             val buf = ByteArray(CHUNK)
-            var seq = 0
+            var seq = (offset / CHUNK).toInt()
             context.contentResolver.openInputStream(uriOf(entry))?.use { input ->
+                var left = offset
+                var zeroReads = 0
+                while (left > 0) {
+                    val n = input.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                    if (n < 0) throw Exception("internal: media ended before offset $offset")
+                    if (n == 0) {
+                        if (++zeroReads > 100) throw Exception("internal: could not seek to $offset")
+                        continue
+                    }
+                    zeroReads = 0
+                    left -= n
+                }
                 while (true) {
                     val n = input.read(buf)
                     if (n <= 0) break

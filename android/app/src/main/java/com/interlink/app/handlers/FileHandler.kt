@@ -13,6 +13,7 @@ import com.interlink.app.FilePickerActivity
 import com.interlink.app.core.Envelope
 import com.interlink.app.core.LinkClient
 import com.interlink.app.core.LinkSession
+import com.interlink.app.core.long
 import com.interlink.app.core.objOf
 import com.interlink.app.core.str
 import com.interlink.app.core.tidRaw
@@ -332,11 +333,19 @@ object FileHandler {
         val input: InputStream,
     )
 
-    /** Respond with metadata, then stream N × 0x02 frames like media.get. */
+    /** Respond with metadata, then stream N × 0x02 frames like media.get.
+     *
+     * `offset` lets the laptop resume a transfer after the link drops. It is
+     * always a whole number of chunks; the response still advertises the
+     * *total* size/chunk count so the receiver can tell when the file is
+     * complete, and `seq` starts at the chunk the offset lands on. */
     suspend fun get(context: Context, session: LinkSession, env: Envelope) = withContext(Dispatchers.IO) {
         val idStr = env.d.str("id") ?: throw Exception("not_found: missing id")
         val tidB64 = env.d.str("tid") ?: throw Exception("internal: missing tid")
+        val offset = (env.d.long("offset") ?: 0L).coerceAtLeast(0L)
+        if (offset % CHUNK != 0L) throw Exception("bad_request: offset must be a multiple of 64 KiB")
         val file = resolve(context, idStr)
+        if (offset > file.size) throw Exception("bad_request: offset past end of file")
         session.respond(
             Envelope.response(
                 env.id, env.t,
@@ -351,8 +360,22 @@ object FileHandler {
         )
         val raw = tidRaw(tidB64)
         val buf = ByteArray(CHUNK)
-        var seq = 0
+        var seq = (offset / CHUNK).toInt()
         file.input.use { input ->
+            var left = offset
+            var zeroReads = 0
+            while (left > 0) {
+                val n = input.read(buf, 0, minOf(buf.size.toLong(), left).toInt())
+                if (n < 0) throw Exception("internal: file ended before offset $offset")
+                if (n == 0) {
+                    // A SAF stream may legitimately hand back 0 bytes; don't
+                    // spin forever if the provider is stuck, either.
+                    if (++zeroReads > 100) throw Exception("internal: could not seek to $offset")
+                    continue
+                }
+                zeroReads = 0
+                left -= n
+            }
             while (true) {
                 val n = input.read(buf)
                 if (n <= 0) break
@@ -381,9 +404,18 @@ object FileHandler {
                 var size = 0L
                 context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
                     if (c.moveToFirst()) {
-                        name = c.getString(0) ?: name
-                        mime = if (c.getString(1).isNullOrBlank()) mime else c.getString(1)
-                        size = c.getLong(2)
+                        // Never rely on the provider keeping our projection
+                        // order: some DocumentProviders add columns of their
+                        // own, which used to make `size` come from the wrong
+                        // slot and silently truncate the transfer.
+                        val nameIdx = c.getColumnIndex(projection[0])
+                        val mimeIdx = c.getColumnIndex(projection[1])
+                        val sizeIdx = c.getColumnIndex(projection[2])
+                        if (nameIdx >= 0) name = c.getString(nameIdx) ?: name
+                        if (mimeIdx >= 0 && !c.getString(mimeIdx).isNullOrBlank()) {
+                            mime = c.getString(mimeIdx)
+                        }
+                        if (sizeIdx >= 0) size = c.getLong(sizeIdx)
                     }
                 }
                 val input = context.contentResolver.openInputStream(uri)
@@ -407,9 +439,14 @@ object FileHandler {
                     var size = 0L
                     context.contentResolver.query(uri, projection, null, null, null)?.use { c ->
                         if (c.moveToFirst()) {
-                            name = c.getString(0) ?: name
-                            mime = if (c.getString(1).isNullOrBlank()) mime else c.getString(1)
-                            size = c.getLong(2)
+                            val nameIdx = c.getColumnIndex(projection[0])
+                            val mimeIdx = c.getColumnIndex(projection[1])
+                            val sizeIdx = c.getColumnIndex(projection[2])
+                            if (nameIdx >= 0) name = c.getString(nameIdx) ?: name
+                            if (mimeIdx >= 0 && !c.getString(mimeIdx).isNullOrBlank()) {
+                                mime = c.getString(mimeIdx)
+                            }
+                            if (sizeIdx >= 0) size = c.getLong(sizeIdx)
                         }
                     }
                     val input = context.contentResolver.openInputStream(uri)
