@@ -4,6 +4,11 @@ version = "0.1.0"
 description = "InterLink — Android ↔ Laptop interconnectivity"
 authors = ["InterLink"]
 edition = "2021"
+# Two binaries live here (desktop + web). Cargo needs to know which one
+# `cargo run` / `cargo build` without `--bin` means — otherwise `tauri dev`
+# and the one-click packaging scripts fail with "could not determine which
+# binary to run".
+default-run = "interlink"
 
 [lib]
 name = "interlink_lib"
