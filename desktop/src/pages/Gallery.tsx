@@ -13,6 +13,7 @@ function fmtSize(n: number) {
 
 export default function Gallery() {
   const connected = useStore((s) => s.connected);
+  const downloadDir = useStore((s) => s.status?.downloadDir ?? "~/InterLink");
   const [items, setItems] = useState<MediaItem[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -147,30 +148,37 @@ export default function Gallery() {
     }
   };
 
-  /** Hand a gallery item to the OS as a real file being dragged.
-   *
-   * The webview cannot do this itself: an HTML drag carries text/URLs only, so
-   * the pointer would drop a useless string. Instead the dragstart is
-   * cancelled and the backend downloads the item (the drop target needs a path
-   * that exists) and then takes over the pointer with a native drag, which
-   * ends when the user releases the mouse over a folder or the desktop. */
+  /** Save on the first drag (visible destination), then hand the local file
+   * to the OS on the next drag. A native drag cannot survive a phone download. */
   const dragOut = async (item: MediaItem) => {
-    // The webview re-fires dragstart for every tile the pointer crosses while
-    // the button is held; only the first gesture may start a drag.
     if (dragBusy.current) return;
     dragBusy.current = true;
-    setPreparing(item.id);
+    let nativeDrag = false;
     try {
-      const r = await api.mediaDrag(item.id, item.name, draggedPaths.current[item.id], item.size);
-      if (r.path) draggedPaths.current[item.id] = r.path;
+      const r = await api.mediaDrag(draggedPaths.current[item.id], item.size);
+      if (r.ok) {
+        nativeDrag = true;
+        setTimeout(() => {
+          dragBusy.current = false;
+        }, 1500);
+        return;
+      }
+      if (!r.needDownload) return;
+      setPreparing(item.id);
+      try {
+        const saved = await api.mediaDownload(item.id, item.name);
+        draggedPaths.current[item.id] = saved.path;
+        addRecentFile(item.name, saved.path);
+        toast(`Saved to ${saved.path} — drag again to copy to desktop`, "success");
+      } catch (e) {
+        toast(String(e), "error");
+      } finally {
+        setPreparing(null);
+      }
     } catch (e) {
       toast(String(e), "error");
     } finally {
-      setPreparing(null);
-      // Hold the guard a little past the call: the native drag outlives it.
-      setTimeout(() => {
-        dragBusy.current = false;
-      }, 1500);
+      if (!nativeDrag) dragBusy.current = false;
     }
   };
 
@@ -230,7 +238,9 @@ export default function Gallery() {
                 title={
                   api.isWeb
                     ? "Open to download this to your computer"
-                    : "Drag this out to copy it to your desktop or a file manager"
+                    : draggedPaths.current[m.id]
+                      ? "Drag this out to copy it to your desktop or a file manager"
+                      : `First drag saves to ${downloadDir}; drag again to copy to desktop`
                 }
                 onClick={() => openItem(m)}
                 onDragStart={(e) => {
@@ -255,7 +265,7 @@ export default function Gallery() {
                   </div>
                 )}
                 <div className="media-size">{fmtSize(m.size)}</div>
-                {preparing === m.id && <div className="media-drag-overlay">Copying…</div>}
+                {preparing === m.id && <div className="media-drag-overlay">Saving to laptop…</div>}
               </div>
             ))}
           </div>
@@ -315,8 +325,8 @@ export default function Gallery() {
             </>
           ) : (
             <>
-              Drag a tile out of the window to copy it to your desktop or a file manager. Files
-              also land in <b>~/InterLink</b> — change the folder in Settings.
+              First drag saves a tile to <b>{downloadDir}</b>; drag it again to copy it to your
+              desktop or a file manager. Change the folder in Settings.
             </>
           )}
         </span>

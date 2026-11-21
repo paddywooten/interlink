@@ -758,7 +758,10 @@ async fn handle_inbound_file_offer(state: &SharedState, env: Envelope) {
     let name = env.d["name"].as_str().unwrap_or("transfer.bin").to_string();
     let mime = env.d["mime"].as_str().unwrap_or("application/octet-stream").to_string();
 
-    let auto = { state.inner.lock().await.cfg.auto_accept_files };
+    // A phone share-sheet send is explicit user consent on the phone; accept
+    // it even if folder drops normally require an extra click here.
+    let from_share = env.d["source"].as_str() == Some("share");
+    let auto = from_share || { state.inner.lock().await.cfg.auto_accept_files };
     if !auto {
         state.emit("push", json!({ "t": "file.offer", "d": env.d }));
         state

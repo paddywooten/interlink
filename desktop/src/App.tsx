@@ -279,7 +279,7 @@ export default function App() {
               const pct = d.total
                 ? ` ${Math.round((d.received / d.total) * 100)}%`
                 : "";
-              toast(`Link dropped — resuming ${d.name ?? "transfer"}${pct}`, "info");
+              toast(`Saving ${d.name ?? "transfer"}${pct} to the laptop folder — resuming`, "info");
             }
             break;
           }

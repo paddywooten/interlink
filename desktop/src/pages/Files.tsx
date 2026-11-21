@@ -21,6 +21,7 @@ function glyph(f: FileItem) {
 
 export default function Files() {
   const connected = useStore((s) => s.connected);
+  const downloadDir = useStore((s) => s.status?.downloadDir ?? "~/InterLink");
   const [path, setPath] = useState("");
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
@@ -111,20 +112,38 @@ export default function Files() {
     }
   };
 
+  /** First drag saves the file to the visible download folder; once it is on
+   * disk the next drag starts a real OS drag immediately. */
   const dragOut = async (f: FileItem) => {
     if (dragBusy.current || f.dir) return;
     dragBusy.current = true;
-    setPreparing(f.id);
+    let nativeDrag = false;
     try {
-      const r = await api.fileDrag(f.id, f.name, draggedPaths.current[f.id], f.size);
-      if (r.path) draggedPaths.current[f.id] = r.path;
+      const r = await api.fileDrag(draggedPaths.current[f.id], f.size);
+      if (r.ok) {
+        // The native drag is now running; the guard is released when it ends.
+        nativeDrag = true;
+        setTimeout(() => {
+          dragBusy.current = false;
+        }, 1500);
+        return;
+      }
+      if (!r.needDownload) return; // another drag is already active
+      setPreparing(f.id);
+      try {
+        const saved = await api.fileDownload(f.id, f.name);
+        draggedPaths.current[f.id] = saved.path;
+        addRecentFile(f.name, saved.path);
+        toast(`Saved to ${saved.path} — drag again to copy to desktop`, "success");
+      } catch (e) {
+        toast(String(e), "error");
+      } finally {
+        setPreparing(null);
+      }
     } catch (e) {
       toast(String(e), "error");
     } finally {
-      setPreparing(null);
-      setTimeout(() => {
-        dragBusy.current = false;
-      }, 1500);
+      if (!nativeDrag) dragBusy.current = false;
     }
   };
 
@@ -226,7 +245,9 @@ export default function Files() {
                     ? "Open folder"
                     : api.isWeb
                       ? "Download to this computer"
-                      : "Drag out to your desktop, or press Download"
+                      : draggedPaths.current[f.id]
+                        ? "Drag out to your desktop, or press Save"
+                        : `First drag saves to ${downloadDir}; drag again to copy to desktop`
                 }
                 onClick={() => f.dir && go(f.path ?? "")}
                 onDragStart={(e) => {
@@ -253,7 +274,7 @@ export default function Files() {
                     {saving === f.id ? "Saving…" : api.isWeb ? "Download" : "💾 Save"}
                   </button>
                 )}
-                {preparing === f.id && <div className="file-drag-overlay">Copying…</div>}
+                {preparing === f.id && <div className="file-drag-overlay">Saving to laptop…</div>}
               </div>
             ))}
           </div>
@@ -266,8 +287,9 @@ export default function Files() {
             <>Drop files anywhere in this page to copy them to the phone; downloads use your browser.</>
           ) : (
             <>
-              Drop files anywhere in the window to copy them to the phone. Drag phone files out
-              to copy them to your desktop. Saved files land in <b>~/InterLink</b>.
+              Drop files anywhere in the window to copy them to the phone. First drag saves a
+              phone file to <b>{downloadDir}</b>; drag the saved file again to copy it to your
+              desktop. The folder is also shown in Settings.
             </>
           )}
         </span>

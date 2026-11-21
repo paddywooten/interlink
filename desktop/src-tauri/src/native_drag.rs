@@ -1,148 +1,91 @@
-//! Native drag-out of Gallery items (desktop app only).
+//! Native drag-out of Gallery/Files items (desktop app only).
 //!
-//! A webview's HTML drag cannot hand a real file to the OS, so the Gallery asks
-//! for this command instead: it downloads the item and then starts a native
-//! drag from the app window. The browser build cannot do that — it offers a
-//! normal download instead.
+//! A webview's HTML drag cannot hand a real file to the OS, so the UI asks for
+//! these commands. A native drag can only be started while the mouse button is
+//! still held — a phone download takes far longer than that — so `*_drag` now
+//! only starts the OS drag from a file that is already on disk. The UI saves a
+//! not-yet-local item first with the ordinary `*_download` command (which has
+//! a visible destination and progress), then the next drag starts instantly.
 
-use crate::commands::{save_file, save_media};
-use crate::state::SharedState;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tauri::State;
 
-/// Drag a gallery item out of the window, onto the desktop or a file manager.
+/// Start a native OS drag for a gallery item that is already saved locally.
 ///
-/// A webview's HTML drag cannot hand a real file to the OS, so this downloads
-/// the item first (the OS drag needs a path that exists) and then starts a
-/// native drag from the app window. The drop target gets a copy; the file
-/// stays in the InterLink folder like "Save to laptop" would leave it.
-///
-/// `path` lets the UI reuse a file downloaded by an earlier drag in this
-/// session, so the second drag starts immediately instead of re-downloading.
+/// `path` comes from the UI's cache of earlier downloads. If it is missing or
+/// stale the UI must call `media_download` first — we never start a download
+/// here because the OS drag would be over long before the bytes arrived.
 #[tauri::command]
 pub async fn media_drag(
-    state: State<'_, SharedState>,
     app: tauri::AppHandle,
     window: tauri::Window,
-    id: String,
-    suggested: Option<String>,
     path: Option<String>,
     size: Option<u64>,
 ) -> Result<Value, String> {
-    // One drag at a time. While the button is held the webview keeps raising
-    // `dragstart` for every tile the pointer crosses; without this a single
-    // gesture would download and start a native drag for each of them.
-    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(json!({ "ok": false, "busy": true }));
-    }
-    let result = prepare_and_drag(
-        &state,
-        &app,
-        window,
-        DragSource::Media(id),
-        suggested,
-        path,
-        size,
-    )
-    .await;
-    if result.is_err() {
-        DRAG_ACTIVE.store(false, Ordering::SeqCst);
-    }
-    result
+    prepare_and_drag(&app, window, path, size)
 }
 
-/// Drag a generic phone file (Files page) out of the window. Same native drag
-/// machinery as a gallery item; only the download request differs.
+/// Start a native OS drag for a generic phone file that is already saved.
 #[tauri::command]
 pub async fn file_drag(
-    state: State<'_, SharedState>,
     app: tauri::AppHandle,
     window: tauri::Window,
-    id: String,
-    suggested: Option<String>,
     path: Option<String>,
     size: Option<u64>,
 ) -> Result<Value, String> {
-    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(json!({ "ok": false, "busy": true }));
-    }
-    let result = prepare_and_drag(
-        &state,
-        &app,
-        window,
-        DragSource::File(id),
-        suggested,
-        path,
-        size,
-    )
-    .await;
-    if result.is_err() {
-        DRAG_ACTIVE.store(false, Ordering::SeqCst);
-    }
-    result
+    prepare_and_drag(&app, window, path, size)
 }
 
-enum DragSource {
-    Media(String),
-    File(String),
-}
-
-/// Set while a drag-out is downloading or being dragged; cleared when the
-/// native drag ends (dropped or cancelled) or fails to start.
+/// Set only while a real native drag is running; cleared when the OS reports
+/// the drop/cancel, so one gesture cannot launch several drags.
 static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 fn drag_finished() {
     DRAG_ACTIVE.store(false, Ordering::SeqCst);
 }
 
-async fn prepare_and_drag(
-    state: &SharedState,
+fn prepare_and_drag(
     app: &tauri::AppHandle,
     window: tauri::Window,
-    source: DragSource,
-    suggested: Option<String>,
     path: Option<String>,
     size: Option<u64>,
 ) -> Result<Value, String> {
-    // Only reuse a file from an earlier drag if its length still matches the
-    // phone's listing. A partial left behind by an interrupted transfer is
-    // never a valid drag source.
-    let reused = match path {
+    if DRAG_ACTIVE.swap(true, Ordering::SeqCst) {
+        return Ok(json!({ "ok": false, "busy": true }));
+    }
+
+    // A partial left behind by an interrupted transfer is never a valid drag
+    // source; require the full expected length before handing it to the OS.
+    let file = match path {
         Some(p)
             if std::path::Path::new(&p).is_file()
                 && size.map_or(true, |want| {
                     std::fs::metadata(&p).map(|m| m.len() == want).unwrap_or(false)
                 }) =>
         {
-            p
+            std::path::PathBuf::from(p)
         }
         _ => {
-            let saved = match source {
-                DragSource::Media(id) => save_media(state, id, suggested, None).await?,
-                DragSource::File(id) => save_file(state, id, suggested, None).await?,
-            };
-            saved
-                .get("path")
-                .and_then(Value::as_str)
-                .map(String::from)
-                .ok_or_else(|| "internal: download path missing".to_string())?
+            DRAG_ACTIVE.store(false, Ordering::SeqCst);
+            return Ok(json!({ "ok": false, "needDownload": true }));
         }
     };
 
-    let file = std::path::PathBuf::from(&reused);
     let icon: &'static [u8] = include_bytes!("../icons/128x128.png");
 
-    // GTK (and AppKit) must start the drag on the main thread; scheduling the
-    // drag here also keeps the async download off the UI thread.
+    // GTK (and AppKit) must start the drag on the main thread.
+    let drag_file = file.clone();
     app.run_on_main_thread(move || {
-        if let Err(e) = start_file_drag(&window, file, icon, drag_finished) {
+        if let Err(e) = start_file_drag(&window, drag_file, icon, drag_finished) {
             log::warn!("native drag failed: {e}");
             drag_finished();
         }
     })
-    .map_err(|e| format!("internal: could not reach the UI thread: {e}"))?;
+    .map_err(|e| {
+        DRAG_ACTIVE.store(false, Ordering::SeqCst);
+        format!("internal: could not reach the UI thread: {e}")
+    })?;
 
     // Safety net: if a platform never reports the drag ending, don't leave
     // drag-out disabled for the rest of the session.
@@ -151,7 +94,7 @@ async fn prepare_and_drag(
         DRAG_ACTIVE.store(false, Ordering::SeqCst);
     });
 
-    Ok(json!({ "ok": true, "path": reused }))
+    Ok(json!({ "ok": true, "path": file.display().to_string() }))
 }
 
 /// Start the OS drag for `file` from the app window (main thread only).

@@ -98,14 +98,16 @@ export const mediaDownload = (id: string, suggested?: string, subdir?: string) =
     subdir,
   });
 
-/** Drag a gallery item onto the desktop / a file manager.
+/** Start a real OS drag for an item that is already saved locally.
  *
- * An HTML drag cannot hand a real file to the OS, so this downloads the item
- * (unless `path` already points at a file from an earlier drag) and then
- * starts a native drag from the window, which the user finishes by releasing
- * the mouse over the drop target. */
-export const mediaDrag = (id: string, suggested?: string, path?: string, size?: number) =>
-  invoke<{ ok: boolean; path?: string; busy?: boolean }>("media_drag", { id, suggested, path, size });
+ * `path` comes from the earlier `mediaDownload`. If it is missing or stale the
+ * backend returns `needDownload` — no bytes are fetched on dragstart, because
+ * a native drag cannot stay alive for a long phone transfer. */
+export const mediaDrag = (path?: string, size?: number) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean; needDownload?: boolean }>("media_drag", {
+    path,
+    size,
+  });
 
 /** Copy a generic phone file into the InterLink folder on this computer. */
 export const fileDownload = (id: string, suggested?: string) =>
@@ -115,9 +117,12 @@ export const fileDownload = (id: string, suggested?: string) =>
 export const fileDownloadUrl = (id: string, name?: string) =>
   `/api/file/file?id=${encodeURIComponent(id)}${name ? `&name=${encodeURIComponent(name)}` : ""}`;
 
-/** Drag a Files row out of the desktop window as a real OS file. */
-export const fileDrag = (id: string, suggested?: string, path?: string, size?: number) =>
-  invoke<{ ok: boolean; path?: string; busy?: boolean }>("file_drag", { id, suggested, path, size });
+/** Start a real OS drag for a Files item already saved by `fileDownload`. */
+export const fileDrag = (path?: string, size?: number) =>
+  invoke<{ ok: boolean; path?: string; busy?: boolean; needDownload?: boolean }>("file_drag", {
+    path,
+    size,
+  });
 
 /** Sort keys the phone accepts for `type:"audio"`. A closed set on purpose:
  * the value lands in an SQL `ORDER BY`, so the phone only ever honours names

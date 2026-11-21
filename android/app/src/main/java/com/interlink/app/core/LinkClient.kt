@@ -62,6 +62,12 @@ class LinkClient(
     val dataCollectors = ConcurrentHashMap<String, Channel<Pair<Int, ByteArray>>>()
     @Volatile private var lastInbound = 0L
 
+    // Once a transport works, keep using it for a while. With both an ADB
+    // tunnel and WiFi available, alternating between them on every reconnect
+    // tears down and rebuilds the socket mid-transfer.
+    @Volatile private var preferredHost: String? = null
+    @Volatile private var preferredUntil = 0L
+
     // ——— public API ———
 
     fun start() {
@@ -139,7 +145,13 @@ class LinkClient(
             //     Connection is refused instantly when no tunnel exists, so
             //     this costs nothing in WiFi mode and makes USB "just work".
             //  2. The last known / UDP-discovered LAN address (WiFi mode).
-            val candidates = linkedSetOf("127.0.0.1")
+            val sticky = preferredHost?.takeIf { System.currentTimeMillis() < preferredUntil }
+            val candidates = linkedSetOf<String>()
+            if (sticky != null) {
+                candidates += sticky
+            } else {
+                candidates += "127.0.0.1"
+            }
             cfg.host?.let { candidates += it }
 
             var connected = false
@@ -147,6 +159,10 @@ class LinkClient(
                 if (!scope.isActive) return
                 try {
                     setState(LinkState.CONNECTING, "$host:${cfg.port}")
+                    // Remember the transport as soon as it is chosen; on any
+                    // failure below the preference is cleared and we fall back.
+                    preferredHost = host
+                    preferredUntil = System.currentTimeMillis() + 10 * 60_000
                     connectSession(host, cfg.port, cfg)
                     attempt = 0
                     connected = true
@@ -156,9 +172,11 @@ class LinkClient(
                     // throws TimeoutCancellationException (a CancellationException)
                     // on expiry — that must NOT kill the retry loop.
                     if (e !is kotlinx.coroutines.TimeoutCancellationException || !scope.isActive) throw e
+                    if (host == preferredHost) preferredHost = null
                     Log.w(tag, "handshake timed out at $host")
                     setState(LinkState.DISCONNECTED, "handshake timeout")
                 } catch (e: Exception) {
+                    if (host == preferredHost) preferredHost = null
                     Log.w(tag, "connect to $host failed: ${e.javaClass.simpleName}: ${e.message}")
                     setState(LinkState.DISCONNECTED, e.message ?: e.javaClass.simpleName)
                 }

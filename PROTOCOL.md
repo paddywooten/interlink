@@ -265,7 +265,7 @@ reporting a dropped reply as sent would be worse than reporting it as failed.
 | `file.done` | P→L | `{tid, path}` — saved location (Android display path); terminal for the tid |
 | `transfer.done` | P→L | `{tid, name, path, size}` — the same completion carrying the name for the laptop UI. Sent alongside `file.done`; laptops report each transfer **once** |
 | `transfer.failed` | P→L | `{tid, name, error}` — assembly failed on the phone |
-| `file.offer` (P→L) | P→L | phone-initiated share: phone sends `file.offer`, laptop replies `{tid, status:"accepted"}` (or a `busy:` error when auto-accept is off), then phone streams `0x02` frames; the laptop assembles and reports `transfer.done` |
+| `file.offer` (P→L) | P→L | phone-initiated share from Android's share sheet: `{tid, name, mime, size, source:"share"}`. The laptop replies `{tid, status:"accepted"}`; `source:"share"` is explicit phone-side consent and is accepted even when ordinary incoming-file auto-accept is off. The phone then streams `0x02` frames and the laptop assembles into its download folder, reporting `transfer.done` with the final path |
 | `transfer.cancel` | ↔ | `{tid, reason?}` |
 
 Chunk size: **64 KiB**. Flow control (`file.ack {tid, seq}` every 32 chunks) is

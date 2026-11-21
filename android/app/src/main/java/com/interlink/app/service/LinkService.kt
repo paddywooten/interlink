@@ -81,6 +81,11 @@ class LinkService : Service() {
             context.stopService(Intent(context, LinkService::class.java))
         }
 
+        /** The live link, for entry points such as the share sheet that need to
+         *  push a file without being the service themselves. */
+        fun activeClient(): LinkClient? =
+            instance?.takeIf { it::client.isInitialized }?.client
+
         /**
          * Whether the OS may still throttle or kill us while the screen is off.
          *

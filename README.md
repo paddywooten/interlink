@@ -16,8 +16,9 @@ Two components, one encrypted protocol:
 - 👥 Contacts — the whole address book on the laptop, searchable, tap to call
 - 🖼️ Gallery — **every** photo and video on the phone, with real totals, video
   thumbnails, and in-app video that streams straight off the phone, so
-  scrubbing works without waiting for a copy. **Drag a photo or video out of
-  the window** onto the desktop or a file manager to copy it to the laptop
+  scrubbing works without waiting for a copy. The first drag saves a photo or
+  video to the laptop's download folder (shown on the page and in Settings);
+  drag it again to copy it to the desktop or a file manager instantly
 - 📂 Files — browse the phone's documents and Downloads on the laptop. On
   Android 11+ InterLink cannot enumerate arbitrary storage from a background
   service, so the **Choose phone folder** button opens the system folder picker
@@ -25,7 +26,8 @@ Two components, one encrypted protocol:
   Save files to the laptop or drag them out of the window. **Drop files anywhere
   into the app window** to copy them the other way, into `Downloads/InterLink`
   on the phone — both directions work in the browser version too (browser
-  downloads/save and HTML5 drop-in)
+  downloads/save and HTML5 drop-in). **Share → InterLink** on the phone sends a
+  file straight to the paired laptop over the encrypted link — no dragging
 - 🎵 Music — the phone's whole song library, searchable by title, artist,
   album or genre and sortable by any of them (plus filename, date and size
   from a dropdown), with an always-on player: queue, seek, next/prev, ±10 s,

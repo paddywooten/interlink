@@ -89,6 +89,26 @@
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- Android share sheet: "Share → InterLink" sends the file straight to
+             the paired laptop over the existing encrypted link, no dragging. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="@string/share_target_label"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
         <!-- Persistent link service -->
         <service
             android:name=".service.LinkService"
