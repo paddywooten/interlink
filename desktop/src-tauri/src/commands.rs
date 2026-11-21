@@ -322,6 +322,36 @@ async fn save_via_get(
     let started = tokio::time::Instant::now();
     let mut attempt = 0usize;
 
+    // A dropped link mid-download is normal on WiFi/USB tunnelling: tell the UI
+    // it is retrying, not that the save failed. Only the final give-up raises
+    // `transfer.failed`, so the user never sees a false error toast.
+    let label = name_hint
+        .clone()
+        .unwrap_or_else(|| format!("download_{id}"));
+    let fail_event = |st: &SharedState, message: &str| {
+        st.emit(
+            "push",
+            json!({
+                "t": "transfer.failed",
+                "d": { "name": label.clone(), "error": message },
+            }),
+        );
+    };
+    let retry_event = |st: &SharedState, message: &str, offset: u64, total: u64| {
+        st.emit(
+            "push",
+            json!({
+                "t": "transfer.retry",
+                "d": {
+                    "name": label.clone(),
+                    "error": message,
+                    "received": offset,
+                    "total": total,
+                },
+            }),
+        );
+    };
+
     loop {
         if tokio::time::Instant::now() >= started + TRANSFER_DEADLINE {
             if last_error.is_empty() {
@@ -365,6 +395,7 @@ async fn save_via_get(
             Err(e) => {
                 state.inner.lock().await.data_collectors.remove(&tid);
                 last_error = e;
+                retry_event(state, &last_error, offset, size.max(offset));
                 continue; // reconnect and try the remaining bytes again
             }
         };
@@ -427,6 +458,7 @@ async fn save_via_get(
                 log::info!(
                     "transfer attempt {attempt} failed: {last_error}; resuming from {offset} bytes"
                 );
+                retry_event(state, &last_error, offset, size);
                 tokio::time::sleep(Duration::from_millis(400)).await;
             }
         }
@@ -436,11 +468,13 @@ async fn save_via_get(
     if let Some(p) = dest {
         let _ = tokio::fs::remove_file(p).await;
     }
-    Err(if last_error.is_empty() {
-        "transfer failed".into()
+    let message = if last_error.is_empty() {
+        "transfer failed".to_string()
     } else {
         last_error
-    })
+    };
+    fail_event(state, &message);
+    Err(message)
 }
 
 /// A URL the webview can put straight into `<audio>` / `<video>` and play.

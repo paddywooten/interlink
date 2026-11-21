@@ -28,6 +28,9 @@ import {
   useStore,
 } from "./store";
 
+/** A long file can reconnect many times; don't toast on every attempt. */
+let lastRetryToast = 0;
+
 /** Browser build: a system notification for phone events while the tab is in
  * the background. The desktop app has native popups for this (popup.rs). */
 function browserNotify(title: string, body: string) {
@@ -267,6 +270,19 @@ export default function App() {
           case "transfer.failed":
             toast(`${d.name ?? "transfer"} failed: ${d.error}`, "error");
             break;
+          case "transfer.retry": {
+            // Intermediate drops are not failures — say so once in a while so
+            // the user knows the drag is still working, not stuck or failed.
+            const now = Date.now();
+            if (now - lastRetryToast > 30_000) {
+              lastRetryToast = now;
+              const pct = d.total
+                ? ` ${Math.round((d.received / d.total) * 100)}%`
+                : "";
+              toast(`Link dropped — resuming ${d.name ?? "transfer"}${pct}`, "info");
+            }
+            break;
+          }
           case "install.status":
             // Pushed by the phone as the PackageInstaller session progresses.
             // The user taps confirm on the phone; this just keeps the laptop

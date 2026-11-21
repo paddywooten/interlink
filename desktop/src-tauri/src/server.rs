@@ -783,9 +783,13 @@ async fn handle_inbound_file_offer(state: &SharedState, env: Envelope) {
         cfg.download_dir.clone()
     };
     tokio::spawn(async move {
-        if let Err(e) = assemble_incoming(&st, tid, size, name, mime, dl_dir, &mut rx).await {
+        if let Err(e) = assemble_incoming(&st, tid, size, name.clone(), mime, dl_dir, &mut rx).await {
             log::warn!("incoming file transfer failed: {} (partial: {})", e.message, e.path.display());
             let _ = tokio::fs::remove_file(&e.path).await;
+            st.emit("push", json!({
+                "t": "transfer.failed",
+                "d": { "name": name, "error": e.message },
+            }));
         }
         st.inner.lock().await.data_collectors.remove(&tid);
     });
@@ -888,7 +892,8 @@ pub async fn assemble_incoming_at(
         Ok(f) => f,
         Err(e) => {
             let message = e.to_string();
-            state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
+            // Callers decide whether this is final: a resumable download
+            // reports a retry instead of an error to the user.
             return Err(fail(message));
         }
     };
@@ -947,7 +952,6 @@ pub async fn assemble_incoming_at(
     let _ = file.flush().await;
 
     if let Some(message) = failure {
-        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
         return Err(fail(message));
     }
     if !transfer_complete(received, size, next_seq, expected_chunks) {
@@ -955,14 +959,12 @@ pub async fn assemble_incoming_at(
             "incomplete transfer: {received} of {size} bytes, chunk {next_seq} of {:?}",
             expected_chunks.unwrap_or(0)
         );
-        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
         return Err(fail(message));
     }
     // A drag-out hands this path straight to the OS. Make sure the bytes are
     // really on disk before the webview is told the save succeeded.
     if let Err(e) = file.sync_all().await {
         let message = format!("could not flush the file: {e}");
-        state.emit("push", json!({ "t": "transfer.failed", "d": { "name": name, "error": message } }));
         return Err(fail(message));
     }
 
